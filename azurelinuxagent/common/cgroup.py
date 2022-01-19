@@ -13,6 +13,7 @@
 # limitations under the License.
 #
 # Requires Python 2.6+ and Openssl 1.0+
+import time
 from collections import namedtuple
 
 import errno
@@ -146,12 +147,19 @@ class CpuCgroup(CGroup):
         """
         try:
             cpuacct_stat = self._get_file_contents('cpuacct.stat')
+            cpuacct_usage = self._get_file_contents('cpuacct.usage')
         except Exception as e:
             if not isinstance(e, (IOError, OSError)) or e.errno != errno.ENOENT:  # pylint: disable=E1101
                 raise CGroupsException("Failed to read cpuacct.stat: {0}".format(ustr(e)))
             if not allow_no_such_file_or_directory_error:
                 raise e
             cpuacct_stat = None
+
+        logger.info("cpu.stat: {0}".format(cpuacct_stat))
+        logger.info("cpu.usage: {0}".format(cpuacct_usage))
+        logger.info("cpu.time: {0}".format(time.time()))
+        output = fileutil.read_file("/proc/uptime")
+        logger.info("cpu.uptime: {0}".format(output))
 
         cpu_ticks = 0
 
@@ -224,6 +232,7 @@ class CpuCgroup(CGroup):
 
         cgroup_delta = self._current_cgroup_cpu - self._previous_cgroup_cpu
         system_delta = max(1, self._current_system_cpu - self._previous_system_cpu)
+        logger.info("cpu.proc: {0}".format(self._osutil.get_processor_cores()))
 
         return round(100.0 * self._osutil.get_processor_cores() * float(cgroup_delta) / float(system_delta), 3)
 

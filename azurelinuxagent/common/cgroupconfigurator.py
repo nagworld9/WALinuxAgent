@@ -506,6 +506,7 @@ class CGroupConfigurator(object):
             _log_cgroup_info("Ensuring the agent's CPUQuota is {0}", quota_percentage)
             if CGroupConfigurator._Impl.__try_set_cpu_quota(quota_percentage):
                 CGroupsTelemetry.set_track_throttled_time(True)
+            _log_cgroup_info('CPUQuota: {0}', systemd.get_unit_property(systemd.get_agent_unit_name(), "CPUQuotaPerSecUSec"))
 
         @staticmethod
         def __reset_agent_cpu_quota():

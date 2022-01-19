@@ -1410,6 +1410,8 @@ class DefaultOSUtil(object):
         """
         system_cpu = 0
         proc_stat = DefaultOSUtil._get_proc_stat()
+        logger.info(" /proc/stat: {0}".format(proc_stat))
+
         if proc_stat is not None:
             for line in proc_stat.splitlines():
                 if ALL_CPUS_REGEX.match(line):
