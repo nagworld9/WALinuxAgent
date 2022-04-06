@@ -266,7 +266,7 @@ class SystemdCgroupsApi(CGroupsApi):
         with self._systemd_run_commands_lock:
             process = subprocess.Popen(  # pylint: disable=W1509
                 "systemd-run --unit={0} --scope --slice={1} {2}".format(scope, extension_slice_name, command),
-                shell=shell,
+                shell=False,
                 cwd=cwd,
                 stdout=stdout,
                 stderr=stderr,
@@ -275,6 +275,24 @@ class SystemdCgroupsApi(CGroupsApi):
 
             # We start systemd-run with shell == True so process.pid is the shell's pid, not the pid for systemd-run
             self._systemd_run_commands.append(process.pid)
+
+            cpu_path, memory_path = self.get_process_cgroup_relative_paths(process.pid)
+
+            def __format_process(pid):
+                """
+                Formats the given PID as a string containing the PID and the corresponding command line truncated to 64 chars
+                """
+                try:
+                    cmdline = '/proc/{0}/cmdline'.format(pid)
+                    if os.path.exists(cmdline):
+                        with open(cmdline, "r") as cmdline_file:
+                            return "[PID: {0}] {1:64.64}".format(pid, cmdline_file.read())
+                except Exception:
+                    pass
+                return "[PID: {0}] UNKNOWN".format(pid)
+
+            logger.info("Extension Process:{0}; CPU controller mounted at:{1}; Memory controller mounted at:{2}".format(
+                __format_process(process.pid), cpu_path, memory_path))
 
         scope_name = scope + '.scope'
 
