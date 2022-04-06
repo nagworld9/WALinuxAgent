@@ -29,7 +29,7 @@ from azurelinuxagent.common.conf import get_agent_pid_file_path
 from azurelinuxagent.common.exception import CGroupsException, ExtensionErrorCodes, ExtensionError, \
     ExtensionOperationError
 from azurelinuxagent.common.future import ustr
-from azurelinuxagent.common.osutil import systemd
+from azurelinuxagent.common.osutil import systemd, get_osutil
 from azurelinuxagent.common.utils import fileutil, shellutil
 from azurelinuxagent.common.utils.extensionprocessutil import handle_process_completion, read_output, \
     TELEMETRY_MESSAGE_MAX_LEN
@@ -129,6 +129,7 @@ class SystemdCgroupsApi(CGroupsApi):
         self._agent_unit_name = None
         self._systemd_run_commands = []
         self._systemd_run_commands_lock = threading.RLock()
+        self._osutil = get_osutil()
 
     def get_systemd_run_commands(self):
         """
@@ -259,7 +260,15 @@ class SystemdCgroupsApi(CGroupsApi):
         # Since '-' is used as a separator in systemd unit names, we replace it with '_' to prevent side-effects.
         return EXTENSION_SLICE_PREFIX + "-" + extension_name.replace('-', '_') + ".slice"
 
-    def start_extension_command(self, extension_name, command, cmd_name, timeout, osutil, shell, cwd, env, stdout, stderr,
+    def get_child_process_id(self, pid):
+        # Extension run is child of the systemd-run and grandchild of the shell process.
+        if pid is not None:
+            ps_output = self._osutil.get_child_processes(pid)
+            child_process_ids = [int(line) for line in ps_output.splitlines()]
+            return child_process_ids[0] if child_process_ids else None
+        return None
+
+    def start_extension_command(self, extension_name, command, cmd_name, timeout, shell, cwd, env, stdout, stderr,
                                 error_code=ExtensionErrorCodes.PluginUnknownFailure):
         scope = "{0}_{1}".format(cmd_name, uuid.uuid4())
         extension_slice_name = self.get_extension_slice_name(extension_name)
@@ -275,12 +284,6 @@ class SystemdCgroupsApi(CGroupsApi):
 
             # We start systemd-run with shell == True so process.pid is the shell's pid, not the pid for systemd-run
             self._systemd_run_commands.append(process.pid)
-            # Extension run is child of the systemd-run and grandchild of the shell process.
-            ext_run_pid = osutil.get_extension_process_id(process.pid)
-            if ext_run_pid is not None:
-                cpu_path, memory_path = self.get_process_cgroup_relative_paths(ext_run_pid)
-                logger.info("Extension Pid:{0}; CPU controller mounted at:{1}; Memory controller mounted at:{2}".format(
-                    ext_run_pid, cpu_path, memory_path))
 
         scope_name = scope + '.scope'
 
@@ -306,8 +309,17 @@ class SystemdCgroupsApi(CGroupsApi):
 
         # Wait for process completion or timeout
         try:
-            return handle_process_completion(process=process, command=command, timeout=timeout, stdout=stdout,
+            systemd_run_pid = self.get_child_process_id(process.pid)
+            process_output = handle_process_completion(process=process, command=command, timeout=timeout, stdout=stdout,
                                              stderr=stderr, error_code=error_code)
+
+            # Extension run is child of the systemd-run and grandchild of the shell process.
+            ext_run_pid = self.get_child_process_id(systemd_run_pid)
+            if ext_run_pid is not None:
+                cpu_path, memory_path = self.get_process_cgroup_relative_paths(ext_run_pid)
+                logger.info("Extension Pid:{0}; CPU controller mounted at:{1}; Memory controller mounted at:{2}".format(
+                    ext_run_pid, cpu_path, memory_path))
+            return process_output
         except ExtensionError as e:
             # The extension didn't terminate successfully. Determine whether it was due to systemd errors or
             # extension errors.

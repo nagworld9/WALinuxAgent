@@ -1522,11 +1522,10 @@ class DefaultOSUtil(object):
         except Exception as e:
             raise OSUtilError("{0}, Retcode: {1}, Error: {2}".format(err_msg, -1, ustr(e)))
 
-    @staticmethod
-    def _get_child_processes(pid):
+    def get_child_processes(pid):
         # This method returns child processes of the parent.
         try:
-            command = ['ps', '-opid', '--no-headers', '--ppid', str(pid)]
+            command = ['pgrep', '--parent', str(pid)]
             output = shellutil.run_command(command)
             return output
         except Exception as error:

@@ -131,7 +131,6 @@ class CGroupConfigurator(object):
             self._cgroups_api = None
             self._agent_cpu_cgroup_path = None
             self._agent_memory_cgroup_path = None
-            self._osutil = get_osutil()
 
         def initialize(self):
             try:
@@ -743,7 +742,7 @@ class CGroupConfigurator(object):
             """
             if self.enabled():
                 try:
-                    return self._cgroups_api.start_extension_command(extension_name, command, cmd_name, timeout, self._osutil,
+                    return self._cgroups_api.start_extension_command(extension_name, command, cmd_name, timeout,
                                                                      shell=shell, cwd=cwd, env=env, stdout=stdout,
                                                                      stderr=stderr, error_code=error_code)
                 except SystemdRunError as exception:
