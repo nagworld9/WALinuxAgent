@@ -235,7 +235,7 @@
             "managedDisk": {
               "storageAccountType": "[variables('osDiskType')]"
             },
-            "diskSizeGB": 32
+            "diskSizeGB": 64
           },
           "imageReference": {
             "publisher": "[parameters('imagePublisher')]",
