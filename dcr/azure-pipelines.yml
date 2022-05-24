@@ -43,7 +43,7 @@ parameters:
 ##
       - publisher: "RedHat"
         offer: "rhel-sig-publishing-test-preview"
-        sku: "9-gen2"
+        sku: "9_0"
         version: "latest"
         name: "rhel9Raw"
 ##
