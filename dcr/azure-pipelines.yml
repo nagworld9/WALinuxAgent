@@ -41,6 +41,12 @@ parameters:
         version: "latest"
         name: "rhel7Raw"
 ##
+      - publisher: "RedHat"
+        offer: "rhel-sig-publishing-test-preview"
+        sku: "9-gen2"
+        version: "latest"
+        name: "rhel9Raw"
+##
       - publisher: "microsoftcblmariner"
         offer: "cbl-mariner"
         sku: "cbl-mariner-1"
