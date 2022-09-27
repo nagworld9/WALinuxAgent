@@ -2985,21 +2985,19 @@ class AgentMemoryCheckTestCase(AgentTestCase):
     @patch("azurelinuxagent.common.logger.info")
     @patch("azurelinuxagent.ga.update.add_event")
     def test_check_agent_memory_usage_raises_exit_exception(self, patch_add_event, patch_info, *_):
-        with mock_wire_protocol(mockwiredata.DATA_FILE) as mock_protocol:
-            with patch("azurelinuxagent.common.cgroupconfigurator.CGroupConfigurator._Impl.check_agent_memory_usage", side_effect=CGroupsException()):
-                with patch('azurelinuxagent.common.conf.get_enable_agent_memory_usage_check', return_value=True):
+        with patch("azurelinuxagent.common.cgroupconfigurator.CGroupConfigurator._Impl.check_agent_memory_usage", side_effect=CGroupsException()):
+            with patch('azurelinuxagent.common.conf.get_enable_agent_memory_usage_check', return_value=True):
+                with self.assertRaises(ExitException) as context_manager:
+                    update_handler = get_update_handler()
 
-                    with self.assertRaises(ExitException) as context_manager:
-                        update_handler = get_update_handler()
-
-                        update_handler._last_check_memory_usage = datetime.utcnow() - timedelta(hours=1)
-                        update_handler._check_agent_memory_usage()
-                        self.assertEqual(1, patch_add_event.call_count)
-                        self.assertTrue(any("Check on agent memory usage" in call_args[0]
-                                            for call_args in patch_info.call_args),
-                                        "The memory check was not written to the agent's log")
-                        self.assertIn("Agent {0} is reached memory limit -- exiting".format(CURRENT_AGENT),
-                                      ustr(context_manager.exception), "An incorrect exception was raised")
+                    update_handler._last_check_memory_usage = datetime.utcnow() - timedelta(hours=1)
+                    update_handler._check_agent_memory_usage()
+                    self.assertEqual(1, patch_add_event.call_count)
+                    self.assertTrue(any("Check on agent memory usage" in call_args[0]
+                                        for call_args in patch_info.call_args),
+                                    "The memory check was not written to the agent's log")
+                    self.assertIn("Agent {0} is reached memory limit -- exiting".format(CURRENT_AGENT),
+                                  ustr(context_manager.exception), "An incorrect exception was raised")
 
 
 class GoalStateIntervalTestCase(AgentTestCase):
