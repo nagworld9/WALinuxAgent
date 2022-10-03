@@ -145,6 +145,9 @@ if __name__ == '__main__':
 
     def __remove_firewalld_rules(self):
         try:
+            # Seems distros already handled tcp rule with insert command before us. Thus producing
+            # duplicate rules in iptable chain. Added extra step to remove tcp insert rule.
+            AddFirewallRules.remove_tcp_insert_firewalld_rule(self._dst_ip, self._uid)
             AddFirewallRules.remove_firewalld_rules(self._dst_ip, self._uid)
         except Exception as error:
             logger.warn(

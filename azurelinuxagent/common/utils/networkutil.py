@@ -262,3 +262,12 @@ class AddFirewallRules(object):
     @staticmethod
     def remove_firewalld_rules(dst_ip, uid):
         AddFirewallRules.__execute_firewall_commands(dst_ip, uid, firewalld_command=FirewallCmdDirectCommands.RemovePassThrough)
+
+    @staticmethod
+    def remove_tcp_insert_firewalld_rule(dst_ip, uid):
+        AddFirewallRules.__raise_if_empty(dst_ip, "Destination IP")
+        AddFirewallRules.__raise_if_empty(uid, "User ID")
+
+        accept_tcp_rule = AddFirewallRules.get_accept_tcp_rule(AddFirewallRules.INSERT_COMMAND, dst_ip,
+                                                               firewalld_command=FirewallCmdDirectCommands.RemovePassThrough)
+        AddFirewallRules.__execute_cmd(accept_tcp_rule)
