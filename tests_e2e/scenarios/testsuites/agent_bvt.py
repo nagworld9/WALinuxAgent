@@ -16,6 +16,7 @@
 #
 
 from tests_e2e.orchestrator.lib.agent_test_suite import AgentTestSuite
+from tests_e2e.scenarios.tests.bvts.agent_update import AgentUpdateBvt
 from tests_e2e.scenarios.tests.bvts.extension_operations import ExtensionOperationsBvt
 from tests_e2e.scenarios.tests.bvts.vm_access import VmAccessBvt
 from tests_e2e.scenarios.tests.bvts.run_command import RunCommandBvt
@@ -42,6 +43,7 @@ class AgentBvt(AgentTestSuite):
             [
                 ExtensionOperationsBvt,  # Tests the basic operations (install, enable, update, uninstall) using CustomScript
                 RunCommandBvt,
-                VmAccessBvt
+                VmAccessBvt,
+                AgentUpdateBvt
             ]
         )
