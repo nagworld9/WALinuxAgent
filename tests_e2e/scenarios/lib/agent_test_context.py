@@ -130,7 +130,7 @@ class AgentTestContext:
         parser.add_argument('-s', '--subscription', required=True)
         parser.add_argument('-vm', '--vm', required=True)
 
-        parser.add_argument('-rw', '--remote-working-directory', dest="remote_working_directory", required=False, default=str(Path('/home')/os.getenv("USER")))
+        parser.add_argument('-rw', '--remote-working-directory', dest="remote_working_directory", required=False, default=str(Path('/home/azureuser')))
         parser.add_argument('-t', '--test-source-directory', dest="test_source_directory", required=False, default=str(AgentTestContext.Paths.DEFAULT_TEST_SOURCE_DIRECTORY))
         parser.add_argument('-w', '--working-directory', dest="working_directory", required=False, default=str(AgentTestContext.Paths.DEFAULT_WORKING_DIRECTORY))
 
