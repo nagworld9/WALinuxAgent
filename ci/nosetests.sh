@@ -4,6 +4,12 @@ set -u
 
 EXIT_CODE=0
 
+echo "$(ls)"
+echo "$(pwd)"
+echo "$(ls /home/waagent/venv)"
+echo "$(find -name "activate")"
+echo "$(find -name "nosetests.sh")"
+
 echo "========================================="
 echo "nosetests -a '!requires_sudo' output"
 echo "========================================="
