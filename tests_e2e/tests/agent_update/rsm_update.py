@@ -52,6 +52,7 @@ class RsmUpdateBvt(AgentTest):
 
         log.info("*******Verifying the Agent Downgrade scenario*******")
         self._mock_rsm_update("1.3.0.0")
+        self._check_requested_version_found_in_gs("1.3.0.0")
         self._prepare_agent()
 
         # Verify downgrade scenario
@@ -66,6 +67,12 @@ class RsmUpdateBvt(AgentTest):
         # log.info("*******Verifying the no version update scenario*******")
         # self._prepare_rsm_update("1.3.1.0")
         # self._verify_guest_agent_update("1.3.1.0")
+
+    def _check_requested_version_found_in_gs(self, requested_version: str) -> None:
+        local_path = self._context.test_source_directory/"tests"/"scripts"/"gs-requested-version.py"
+        remote_path = self._context.remote_working_directory/"gs-requested-version.py"
+        self._ssh_client.copy(local_path, remote_path)
+        self._ssh_client.run_command(f"sudo {remote_path} -v {requested_version}")
 
     def _prepare_agent(self) -> None:
         """
