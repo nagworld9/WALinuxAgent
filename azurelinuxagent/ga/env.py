@@ -173,6 +173,8 @@ class MonitorHostNameChanges(PeriodicOperation):
             self._osutil.set_hostname(curr_hostname)
             self._osutil.publish_hostname(curr_hostname)
             self._hostname = curr_hostname
+            _, output = shellutil.run("while sleep 1; do echo running; done")
+            logger.info("EnvMonitor: Shell status: {0}", output)
 
 
 class EnvHandler(ThreadHandlerInterface):
