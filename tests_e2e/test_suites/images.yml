@@ -67,7 +67,7 @@ image-sets:
 #
 images:
    alma_9:
-      urn: "almalinux almalinux 9-gen2 latest"
+      urn: "almalinux almalinux 9-gen1 latest"
       locations:
          AzureChinaCloud: []
    centos_610: "OpenLogic CentOS 6.10 latest"
