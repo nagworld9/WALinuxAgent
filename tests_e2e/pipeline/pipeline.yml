@@ -17,7 +17,7 @@ parameters:
   - name: test_suites
     displayName: Test Suites (comma-separated list of test suites to run)
     type: string
-    default: "-"
+    default: "agent_update"
 
   - name: image
     displayName: Image (image/image set name, URN, or VHD)
