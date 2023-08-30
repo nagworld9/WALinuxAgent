@@ -138,8 +138,8 @@ class RsmUpdateBvt(AgentTest):
         self._run_remote_test(f"agent_update-modify_agent_version {daemon_version}", use_sudo=True)
         log.info('Successfully updated agent installed version')
         if update_config:
-            log.info('Executing update-waagent-conf remote script to update agent update config flags to allow and download test versions')
-            self._run_remote_test("update-waagent-conf Debug.DownloadNewAgents=y AutoUpdate.GAFamily=Test", use_sudo=True)
+            log.info('Executing update-waagent-conf remote script to update agent update config flags to allow and download rsm requested test versions')
+            self._run_remote_test("update-waagent-conf Debug.EnableGAVersioning=y AutoUpdate.GAFamily=Test", use_sudo=True)
             log.info('Successfully updated agent update config')
 
     @staticmethod
