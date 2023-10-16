@@ -74,7 +74,7 @@ class VMAgentFamily(object):
         # This is the Requested version as specified by the Goal State, it defaults to 0.0.0.0 if not specified in GS
         self.requested_version_string = VERSION_0 if version is None else version
         # Set to False if the version from rsm property is not specified in the GS
-        self.is_version_from_rsm = False
+        self.is_version_from_rsm = None
         self.uris = []
 
     @property
