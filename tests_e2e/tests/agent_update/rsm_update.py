@@ -50,7 +50,7 @@ class RsmUpdateBvt(AgentTest):
             ip_address=self._context.vm_ip_address,
             username=self._context.username,
             private_key_file=self._context.private_key_file)
-        self._installed_agent_version = "9.9.9.9"
+        self._upgrade_version = "9.9.9.9"
         self._downgrade_version = "9.9.9.9"
 
     def get_ignore_error_rules(self) -> List[Dict[str, Any]]:
@@ -61,8 +61,8 @@ class RsmUpdateBvt(AgentTest):
             # WARNING ExtHandler ExtHandler Agent WALinuxAgent-9.9.9.9 is permanently blacklisted
             # Note: Version varies depending on the pipeline branch the test is running on
             {
-                'message': rf"Agent WALinuxAgent-{self._installed_agent_version} is permanently blacklisted",
-                'if': lambda r: r.prefix == 'ExtHandler' and self._installed_agent_version > self._downgrade_version
+                'message': rf"Agent WALinuxAgent-{self._upgrade_version} is permanently blacklisted",
+                'if': lambda r: r.prefix == 'ExtHandler' and self._upgrade_version > self._downgrade_version
             },
             # We don't allow downgrades below then daemon version
             # 2023-07-11T02:28:21.249836Z WARNING ExtHandler ExtHandler [AgentUpdateError] The Agent received a request to downgrade to version 1.4.0.0, but downgrading to a version less than the Agent installed on the image (1.4.0.1) is not supported. Skipping downgrade.
@@ -80,36 +80,36 @@ class RsmUpdateBvt(AgentTest):
         # Allow agent to send supported feature flag
         self._verify_agent_reported_supported_feature_flag()
 
-        log.info("*******Verifying the Agent Downgrade scenario*******")
-        stdout: str = self._ssh_client.run_command("waagent-version", use_sudo=True)
-        log.info("Current agent version running on the vm before update is \n%s", stdout)
-        self._downgrade_version: str = "1.5.0.0"
-        log.info("Attempting downgrade version %s", self._downgrade_version)
-        self._request_rsm_update(self._downgrade_version)
-        self._check_rsm_gs(self._downgrade_version)
-        self._prepare_agent()
-        # Verify downgrade scenario
-        self._verify_guest_agent_update(self._downgrade_version)
-        self._verify_agent_reported_update_status(self._downgrade_version)
-
-
         # Verify upgrade scenario
         log.info("*******Verifying the Agent Upgrade scenario*******")
         stdout: str = self._ssh_client.run_command("waagent-version", use_sudo=True)
         log.info("Current agent version running on the vm before update is \n%s", stdout)
-        upgrade_version: str = "1.5.1.0"
-        log.info("Attempting upgrade version %s", upgrade_version)
-        self._request_rsm_update(upgrade_version)
-        self._check_rsm_gs(upgrade_version)
-        self._verify_guest_agent_update(upgrade_version)
-        self._verify_agent_reported_update_status(upgrade_version)
+        self._upgrade_version: str = "9.10.0.1"
+        log.info("Attempting upgrade version %s", self._upgrade_version)
+        self._request_rsm_update(self._upgrade_version)
+        self._check_rsm_gs(self._upgrade_version)
+        self._prepare_agent()
+        # Verify upgrade scenario
+        self._verify_guest_agent_update(self._upgrade_version)
+        self._verify_agent_reported_update_status(self._upgrade_version)
+
+        log.info("*******Verifying the Agent Downgrade scenario*******")
+        stdout: str = self._ssh_client.run_command("waagent-version", use_sudo=True)
+        log.info("Current agent version running on the vm before update is \n%s", stdout)
+        self._downgrade_version: str = "9.10.0.0"
+        log.info("Attempting downgrade version %s", self._downgrade_version)
+        self._request_rsm_update(self._downgrade_version)
+        self._check_rsm_gs(self._downgrade_version)
+        # Verify downgrade scenario
+        self._verify_guest_agent_update(self._downgrade_version)
+        self._verify_agent_reported_update_status(self._downgrade_version)
 
         # verify no version update. There is bug in CRP and will enable once it's fixed
         log.info("*******Verifying the no version update scenario*******")
         stdout: str = self._ssh_client.run_command("waagent-version", use_sudo=True)
         log.info("Current agent version running on the vm before update is \n%s", stdout)
-        version: str = "1.5.1.0"
-        log.info("Attempting update version same as current version %s", upgrade_version)
+        version: str = "9.10.0.0"
+        log.info("Attempting update version same as current version %s", version)
         self._request_rsm_update(version)
         self._check_rsm_gs(version)
         self._verify_guest_agent_update(version)
@@ -117,12 +117,10 @@ class RsmUpdateBvt(AgentTest):
 
         # verify requested version below daemon version
         log.info("*******Verifying requested version below daemon version scenario*******")
-        # changing daemon version to 1.5.0.1 from 1.0.0.0 as there is no pkg below than 1.0.0.0 available in PIR, Otherwise we will get pkg not found error
-        self._prepare_agent("1.5.0.1", update_config=False)
         stdout: str = self._ssh_client.run_command("waagent-version", use_sudo=True)
         log.info("Current agent version running on the vm before update is \n%s", stdout)
         version: str = "1.5.0.0"
-        log.info("Attempting requested version %s", version)
+        log.info("Attempting requested version %s less than daemon version", version)
         self._request_rsm_update(version)
         self._check_rsm_gs(version)
         self._verify_no_guest_agent_update(version)
@@ -134,19 +132,14 @@ class RsmUpdateBvt(AgentTest):
         output = self._ssh_client.run_command(f"agent_update-wait_for_rsm_gs.py --version {requested_version}", use_sudo=True)
         log.info('Verified latest GS includes requested version available to the agent. \n%s', output)
 
-    def _prepare_agent(self, daemon_version="1.0.0.0", update_config=True) -> None:
+    def _prepare_agent(self) -> None:
         """
         This method is to ensure agent is ready for accepting rsm updates. As part of that we update following flags
-        1) Changing daemon version since daemon has a hard check on agent version in order to update agent. It doesn't allow versions which are less than daemon version.
-        2) Updating GAFamily type "Test" and GAUpdates flag to process agent updates on test versions.
+        1) Updating GAFamily type "Test" and GAUpdates flag to process agent updates on test versions.
         """
-        log.info('Modifying agent installed version')
-        output = self._ssh_client.run_command(f"agent_update-modify_agent_version {daemon_version}", use_sudo=True)
-        log.info('Updated agent installed version \n%s', output)
-        if update_config:
-            log.info('Modifying agent update config flags')
-            output = self._ssh_client.run_command("update-waagent-conf Debug.EnableGAVersioning=y AutoUpdate.GAFamily=Test", use_sudo=True)
-            log.info('updated agent update required config \n%s', output)
+        log.info('Modifying agent update config flags')
+        output = self._ssh_client.run_command("update-waagent-conf Debug.EnableGAVersioning=y AutoUpdate.GAFamily=Test", use_sudo=True)
+        log.info('updated agent update required config \n%s', output)
 
     @staticmethod
     def _verify_agent_update_flag_enabled(vm: VirtualMachineClient) -> bool:
