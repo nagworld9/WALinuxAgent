@@ -575,7 +575,7 @@ def get_agent_memory_quota(conf=__conf__):
 
     NOTE: This option is experimental and may be removed in later versions of the Agent.
     """
-    return conf.get_int("Debug.AgentMemoryQuota", 100 * 1024 ** 2)
+    return conf.get_int("Debug.AgentMemoryQuota", 50 * 1024 ** 2)
 
 
 def get_enable_agent_memory_usage_check(conf=__conf__):

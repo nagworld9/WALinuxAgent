@@ -793,11 +793,11 @@ class CGroupConfigurator(object):
                 for metric in metrics:
                     if metric.counter == MetricsCounter.TOTAL_MEM_USAGE:
                         current_usage += metric.value
-                    elif metric.counter == MetricsCounter.SWAP_MEM_USAGE:
-                        current_usage += metric.value
+                    elif metric.counter == MetricsCounter.CACHE_MEMORY_USAGE:
+                        current_usage -= metric.value
 
                 if current_usage > conf.get_agent_memory_quota():
-                    raise AgentMemoryExceededException("The agent memory limit {0} bytes exceeded. The current reported usage is {1} bytes.".format(conf.get_agent_memory_quota(), current_usage))
+                    raise AgentMemoryExceededException("The agent memory limit {0} bytes exceeded. The current RSS reported usage is {1} bytes.".format(conf.get_agent_memory_quota(), current_usage))
 
         @staticmethod
         def _get_parent(pid):
