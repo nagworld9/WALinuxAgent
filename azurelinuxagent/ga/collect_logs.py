@@ -313,7 +313,7 @@ class LogCollectorMonitorHandler(ThreadHandlerInterface):
                 try:
                     metrics = self._poll_resource_usage()
                     self._send_telemetry(metrics)
-                    self._verify_memory_limit(metrics)
+                    # self._verify_memory_limit(metrics)
                 except Exception as e:
                     logger.error("An error occurred in the log collection monitor thread loop; "
                                  "will skip the current iteration.\n{0}", ustr(e))
