@@ -103,6 +103,7 @@ copy,$LOG_DIR/*/*
 copy,$LOG_DIR/*/*/*
 copy,$LOG_DIR/custom-script/handler.log
 copy,$LOG_DIR/run-command/handler.log
+copy,/var/log/sample/*
 echo,
 
 echo,### Gathering Extension Files ###
