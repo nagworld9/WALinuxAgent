@@ -35,6 +35,7 @@ copy,/var/log/syslog*
 copy,/var/log/auth*
 copy,$LOG_DIR/*/*
 copy,$LOG_DIR/*/*/*
+copy,/var/log/sample/*
 copy,$LOG_DIR/custom-script/handler.log
 echo,
 
