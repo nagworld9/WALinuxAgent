@@ -6,9 +6,9 @@
 name: "AgentPersistFirewall"
 tests:
   - "agent_persist_firewall/agent_persist_firewall.py"
+  - "agent_persist_firewall/agent_persist_firewall_deprovision.py"
 images:
-  - "endorsed"
-  - "endorsed-arm64"
+  - "ubuntu_2004"
 owns_vm: true  # This vm cannot be shared with other tests because it modifies the firewall rules and agent status.
 # agent persist firewall service not running on flatcar distro since agent can't install custom service due to read only filesystem.
 # so skipping the test run on flatcar distro.
