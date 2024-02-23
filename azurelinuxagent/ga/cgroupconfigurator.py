@@ -601,7 +601,9 @@ class CGroupConfigurator(object):
                 systemd_run_commands.update(self._cgroups_api.get_systemd_run_commands())
 
                 for process in agent_cgroup:
-                    agent_cgroup_proc_names.append(self.__format_process(process))
+                    format = self.__format_process(process)
+                    agent_cgroup_proc_names.append(format)
+                    logger.info("Agent cgroup process: {0}", format)
                     # Note that the agent uses systemd-run to start extensions; systemd-run belongs to the agent cgroup, though the extensions don't.
                     if process in (daemon, extension_handler) or process in systemd_run_commands:
                         continue
