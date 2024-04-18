@@ -115,9 +115,7 @@ jobs:
         continueOnError: true
         env:
           SUBSCRIPTION_ID: $(SUBSCRIPTION-ID)
-          AZURE_CLIENT_ID: $(AZURE-CLIENT-ID)
-          AZURE_CLIENT_SECRET: $(AZURE-CLIENT-SECRET)
-          AZURE_TENANT_ID: $(AZURE-TENANT-ID)
+          AZURE_CLIENT_ID: "70b4b26b-1d9a-4872-bedf-ecb9e022f721"
           CR_USER: $(CR-USER)
           CR_SECRET: $(CR-SECRET)
           CLOUD: ${{ variables.cloud }}

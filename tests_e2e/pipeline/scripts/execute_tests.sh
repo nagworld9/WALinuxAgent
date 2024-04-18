@@ -77,8 +77,6 @@ docker run --rm \
     --volume "$AGENT_TEMPDIRECTORY"/ssh:/home/waagent/.ssh \
     --volume "$LOGS_DIRECTORY":/home/waagent/logs \
     --env AZURE_CLIENT_ID \
-    --env AZURE_CLIENT_SECRET \
-    --env AZURE_TENANT_ID \
     waagenttests.azurecr.io/waagenttests \
     bash --login -c \
       "lisa \
