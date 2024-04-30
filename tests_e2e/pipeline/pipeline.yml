@@ -127,7 +127,7 @@ jobs:
           SUBSCRIPTION_ID: "8e037ad4-618f-4466-8bc8-5099d41ac15b"
           AZURE_CLIENT_ID: "025e65ab-ece3-440d-8d29-77f9a3da875f"
           AZURE_TENANT_ID: "72f988bf-86f1-41af-91ab-2d7cd011db47"
-          CR_USER: "waagent-tests"
+          CR_USER: $(CR-USER)
           CR_SECRET: $(CR-SECRET)
           CLOUD: ${{ variables.cloud }}
           COLLECT_LOGS: ${{ parameters.collect_logs }}
