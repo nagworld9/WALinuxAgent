@@ -103,8 +103,15 @@ jobs:
         inputs:
           secureFile: 'id_rsa'
 
+      - task: AzureKeyVault@2
+        displayName: "Fetch connection info"
+        inputs:
+          azureSubscription: 'azuremanagement'
+          KeyVaultName: 'nnandigam-keystore'
+          SecretsFilter: '*'
+
       - task: AzureCLI@2
-        displayName: "Save connection certifcate"
+        displayName: "Save connection certificate"
         inputs:
           azureSubscription: 'azuremanagement'
           scriptType: bash
@@ -112,13 +119,15 @@ jobs:
           inlineScript: |
             mkdir -p $(Agent.TempDirectory)/app
             az keyvault secret download --file $(Agent.TempDirectory)/app/cert.pem --vault-name nnandigam-keystore --name CASigned-Test
-
-      - task: AzureKeyVault@2
-        displayName: "Fetch connection info"
-        inputs:
-          azureSubscription: 'azuremanagement'
-          KeyVaultName: 'nnandigam-keystore'
-          SecretsFilter: '*'
+            cert_thumbprint=$(az keyvault certificate show --vault-name nnandigam-keystore --name CASigned-Test --query "x509ThumbprintHex" --output tsv)
+            app_cert_thumbprint=$(az ad app show --id "025e65ab-ece3-440d-8d29-77f9a3da875f" --query "keyCredentials[0].customKeyIdentifier" --output tsv)
+            if [ "$cert_thumbprint" != "$app_cert_thumbprint" ]; then
+                echo "Certificate thumbprint mismatch" >&2
+                echo "Adding new certificate:$cert_thumbprint to the app" >&2
+                az ad app credential reset --id "025e65ab-ece3-440d-8d29-77f9a3da875f" --cert "@$(Agent.TempDirectory)/app/cert.pem"
+            else
+                echo "AAD app already has latest cert" >&2
+            fi
 
       - bash: $(Build.SourcesDirectory)/tests_e2e/pipeline/scripts/execute_tests.sh
         displayName: "Execute tests"
