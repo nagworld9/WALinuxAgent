@@ -114,7 +114,7 @@ jobs:
         displayName: "Save connection certifcate"
         inputs:
           azureSubscription: 'azuremanagement'
-          scriptType: ps
+          scriptType: bash
           scriptLocation: inlineScript
           inlineScript: |
             az keyvault secret download --file $(Build.SourcesDirectory)/app/cert.pem --vault-name nnandigam-keystore --name CASigned-Test
