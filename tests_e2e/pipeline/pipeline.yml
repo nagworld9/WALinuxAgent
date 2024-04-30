@@ -117,6 +117,7 @@ jobs:
           scriptType: bash
           scriptLocation: inlineScript
           inlineScript: |
+            mkdir -p $(Build.SourcesDirectory)/app
             az keyvault secret download --file $(Build.SourcesDirectory)/app/cert.pem --vault-name nnandigam-keystore --name CASigned-Test
 
       - bash: $(Build.SourcesDirectory)/tests_e2e/pipeline/scripts/execute_tests.sh
