@@ -79,7 +79,7 @@ docker run --rm \
     --volume "$AGENT_TEMPDIRECTORY"/app:/home/waagent/app \
     --volume "$LOGS_DIRECTORY":/home/waagent/logs \
     --env AZURE_CLIENT_ID \
-    --env $AZURE_CLIENT_CERTIFICATE_PATH \
+    --env AZURE_CLIENT_CERTIFICATE_PATH=$AZURE_CLIENT_CERTIFICATE_PATH \
     --env AZURE_TENANT_ID \
     waagenttests.azurecr.io/waagenttests \
     bash --login -c \
