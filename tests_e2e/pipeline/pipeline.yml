@@ -128,7 +128,7 @@ jobs:
           AZURE_CLIENT_ID: "025e65ab-ece3-440d-8d29-77f9a3da875f"
           AZURE_TENANT_ID: "72f988bf-86f1-41af-91ab-2d7cd011db47"
           CR_USER: "waagent-tests"
-          CR_SECRET: "wEglOOdZ9VTzhzdO3I0QxQj8MCKfQnW2hvSuGT+F2k+ACRB/Fa9V"
+          CR_SECRET: $(CR-SECRET)
           CLOUD: ${{ variables.cloud }}
           COLLECT_LOGS: ${{ parameters.collect_logs }}
           IMAGE: ${{ parameters.image }}
