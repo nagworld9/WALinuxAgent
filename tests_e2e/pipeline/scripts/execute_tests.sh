@@ -71,11 +71,16 @@ fi
 # Get the external IP address of the VM.
 #
 IP_ADDRESS=$(curl -4 ifconfig.io/ip)
+AZURE_CLIENT_CERTIFICATE_PATH=/home/waagent/app/cert.pfx
 
 docker run --rm \
     --volume "$BUILD_SOURCESDIRECTORY:/home/waagent/WALinuxAgent" \
     --volume "$AGENT_TEMPDIRECTORY"/ssh:/home/waagent/.ssh \
+    --volume "$AGENT_TEMPDIRECTORY"/app:/home/waagent/app \
     --volume "$LOGS_DIRECTORY":/home/waagent/logs \
+    --env AZURE_CLIENT_ID \
+    --env $AZURE_CLIENT_CERTIFICATE_PATH \
+    --env AZURE_TENANT_ID \
     waagenttests.azurecr.io/waagenttests \
     bash --login -c \
       "lisa \

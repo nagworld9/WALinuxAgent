@@ -107,17 +107,26 @@ jobs:
         displayName: "Fetch connection info"
         inputs:
           azureSubscription: 'azuremanagement'
-          KeyVaultName: '$(connection_info)'
+          KeyVaultName: 'nnandigam-keystore'
           SecretsFilter: '*'
 
+      - task: PowerShell@2
+        displayName: "Save key valut certificate"
+        inputs:
+          targetType: 'inline'
+          script: |
+            $kvSecretBytes = [System.Convert]::FromBase64String("$(CASigned-Test)")
+            $certCollection = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection
+            $certCollection.Import($kvSecretBytes,$null,[System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable)
+            $pfxFileByte = $x509Cert.Export([Security.Cryptography.X509Certificates.X509ContentType]::Pkcs12)
+            [System.IO.File]::WriteAllBytes("$(Agent.TempDirectory)/app/cert.pfx", $pfxFileByte)
       - bash: $(Build.SourcesDirectory)/tests_e2e/pipeline/scripts/execute_tests.sh
         displayName: "Execute tests"
         continueOnError: true
         env:
-          SUBSCRIPTION_ID: $(SUBSCRIPTION-ID)
-          AZURE_CLIENT_ID: $(AZURE-CLIENT-ID)
-          AZURE_CLIENT_SECRET: $(AZURE-CLIENT-SECRET)
-          AZURE_TENANT_ID: $(AZURE-TENANT-ID)
+          SUBSCRIPTION_ID: "8e037ad4-618f-4466-8bc8-5099d41ac15b"
+          AZURE_CLIENT_ID: "025e65ab-ece3-440d-8d29-77f9a3da875f"
+          AZURE_TENANT_ID: "72f988bf-86f1-41af-91ab-2d7cd011db47"
           CR_USER: $(CR-USER)
           CR_SECRET: $(CR-SECRET)
           CLOUD: ${{ variables.cloud }}
