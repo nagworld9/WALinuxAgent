@@ -71,7 +71,7 @@ fi
 # Get the external IP address of the VM.
 #
 IP_ADDRESS=$(curl -4 ifconfig.io/ip)
-AZURE_CLIENT_CERTIFICATE_PATH=/home/waagent/app/cert.pem
+AZURE_CLIENT_CERTIFICATE_PATH="/home/waagent/app/cert.pem"
 
 docker run --rm \
     --volume "$BUILD_SOURCESDIRECTORY:/home/waagent/WALinuxAgent" \

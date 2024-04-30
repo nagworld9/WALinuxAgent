@@ -111,7 +111,7 @@ jobs:
           scriptLocation: inlineScript
           inlineScript: |
             mkdir -p $(Build.SourcesDirectory)/app
-            az keyvault secret download --file $(Build.SourcesDirectory)/app/cert.pem --vault-name nnandigam-keystore --name CASigned-Test
+            az keyvault secret download --file $(Agent.BuildDirectory)/app/cert.pem --vault-name nnandigam-keystore --name CASigned-Test
 
       - task: AzureKeyVault@2
         displayName: "Fetch connection info"
