@@ -110,7 +110,7 @@ jobs:
           scriptType: bash
           scriptLocation: inlineScript
           inlineScript: |
-            mkdir -p $(Build.SourcesDirectory)/app
+            mkdir -p $(Agent.BuildDirectory)/app
             az keyvault secret download --file $(Agent.BuildDirectory)/app/cert.pem --vault-name nnandigam-keystore --name CASigned-Test
 
       - task: AzureKeyVault@2
