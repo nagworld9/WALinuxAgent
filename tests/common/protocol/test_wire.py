@@ -29,13 +29,14 @@ from azurelinuxagent.common.agent_supported_feature import SupportedFeatureNames
 from azurelinuxagent.common.event import WALAEventOperation
 from azurelinuxagent.common.exception import ResourceGoneError, ProtocolError, \
     ExtensionDownloadError, HttpError
+from azurelinuxagent.common.future import ustr
 from azurelinuxagent.common.protocol.extensions_goal_state_from_extensions_config import ExtensionsGoalStateFromExtensionsConfig
 from azurelinuxagent.common.protocol.goal_state import GoalStateProperties
 from azurelinuxagent.common.protocol.hostplugin import HostPluginProtocol
 from azurelinuxagent.common.protocol.wire import WireProtocol, WireClient, \
     StatusBlob, VMStatus
 from azurelinuxagent.common.telemetryevent import GuestAgentExtensionEventsSchema, \
-    TelemetryEventParam, TelemetryEvent
+    TelemetryEventParam, TelemetryEvent, TelemetryEventRecord
 from azurelinuxagent.common.utils import restutil
 from azurelinuxagent.common.version import CURRENT_VERSION, DISTRO_NAME, DISTRO_VERSION
 from azurelinuxagent.ga.exthandlers import get_exthandlers_handler
@@ -64,7 +65,8 @@ def get_event(message, duration=30000, evt_type="", is_internal=False, is_succes
     event.parameters.append(TelemetryEventParam(GuestAgentExtensionEventsSchema.Message, message))
     event.parameters.append(TelemetryEventParam(GuestAgentExtensionEventsSchema.Duration, duration))
     event.parameters.append(TelemetryEventParam(GuestAgentExtensionEventsSchema.ExtensionType, evt_type))
-    return event
+    event_record = TelemetryEventRecord(event)
+    return event_record
 
 
 @contextlib.contextmanager
@@ -421,7 +423,7 @@ class TestWireProtocol(AgentTestCase, HttpRequestPredicates):
 
         event_str = u'a test string'
         client = WireProtocol(WIRESERVER_URL).client
-        client.send_encoded_event("foo", event_str.encode('utf-8'))
+        client.send_encoded_event("foo", event_str.encode('utf-8'), False)
 
         first_call = mock_http_request.call_args_list[0]
         args, kwargs = first_call
@@ -478,6 +480,88 @@ class TestWireProtocol(AgentTestCase, HttpRequestPredicates):
         client.report_event(self._get_telemetry_events_generator(event_list))
 
         self.assertEqual(patch_send_event.call_count, 0)
+
+    @patch("azurelinuxagent.common.utils.restutil.http_request")
+    @patch("azurelinuxagent.common.protocol.wire.logger.verbose")
+    def test_report_event_should_honor_telemetry_api_limits(self, mock_logger, mock_http_request, *args):  # pylint: disable=unused-argument
+        mock_http_request.return_value = MockHttpResponse(200)
+        event_list = []
+        event_str = random_generator(2 ** 15)
+        event_list.append(get_event(message=event_str))
+        event_list.append(get_event(message=event_str))
+        event_list.append(get_event(message=event_str))
+
+        with patch("azurelinuxagent.common.protocol.wire.TELEMETRY_MAX_CALLS_PER_INTERVAL", 2):
+            with patch("azurelinuxagent.common.protocol.wire.TELEMETRY_INTERVAL", 0.2):
+                with patch("azurelinuxagent.common.protocol.wire.TELEMETRY_DELAY", 0.1):
+                    client = WireProtocol(WIRESERVER_URL).client
+                    client.report_event(self._get_telemetry_events_generator(event_list))
+                    self.assertEqual(mock_http_request.call_count, 3)
+
+                    call_args = [args for args, _ in mock_logger.call_args_list if
+                                 "Reached telemetry api throttling limit: 2" in args[0]]
+                    self.assertTrue(
+                        len(call_args) >= 1 and len(call_args[0]) == 1 and "Reached telemetry api throttling limit" in
+                        call_args[0][0],
+                        "Expected telemetry api throttling limit log. Log calls: {0}".format(
+                            mock_logger.call_args_list))
+
+    @patch("azurelinuxagent.common.utils.restutil.http_request")
+    def test_report_event_should_handle_delete_files_after_sending_data(self, mock_http_request, *args):  # pylint: disable=unused-argument
+        # happy path, event is sent successfully
+        mock_http_request.return_value = MockHttpResponse(200)
+        event_list = []
+        event_str = random_generator(2 ** 15)
+        event_record = get_event(message=event_str)
+        event_file = self._get_event_file()
+        event_record.file_path = event_file
+        event_list.append(event_record)
+        client = WireProtocol(WIRESERVER_URL).client
+        client.report_event(self._get_telemetry_events_generator(event_list))
+        self.assertEqual(mock_http_request.call_count, 1)
+        self.assertFalse(os.path.exists(event_record.file_path), "The event file should be deleted")
+
+        # failed to send event, event file should not be deleted
+        mock_http_request.return_value = MockHttpResponse(500)
+        event_list = []
+        event_str = random_generator(2 ** 15)
+        event_record = get_event(message=event_str)
+        event_record.file_path = self._get_event_file()
+        event_list.append(event_record)
+        client.report_event(self._get_telemetry_events_generator(event_list))
+        # total 2 calls, 1 for the previous success and 1 for the current failure
+        self.assertEqual(mock_http_request.call_count, 2)
+        self.assertTrue(os.path.exists(event_record.file_path), "The event file should not be deleted")
+
+        # if event is larger than allowed size, event file should be deleted
+        event_list = []
+        event_str = random_generator(2 ** 17)
+        event_record = get_event(message=event_str)
+        event_file = self._get_event_file()
+        event_record.file_path = event_file
+        event_list.append(event_record)
+        client.report_event(self._get_telemetry_events_generator(event_list))
+        # total 2 calls, since we skip sending large event
+        self.assertEqual(mock_http_request.call_count, 2)
+        self.assertFalse(os.path.exists(event_file), "The event file should be deleted")
+
+    @patch("azurelinuxagent.common.utils.restutil._http_request")
+    def test_report_event_should_not_retry_on_throttling_error(self, mock_http_request, *args):  # pylint: disable=unused-argument
+        mock_http_request.return_value = MockHttpResponse(429)
+        event_list = []
+        event_str = random_generator(2 ** 15)
+        event_list.append(get_event(message=event_str))
+        client = WireProtocol(WIRESERVER_URL).client
+        client.report_event(self._get_telemetry_events_generator(event_list))
+        self.assertEqual(mock_http_request.call_count, 1)
+
+    def _get_event_file(self):
+        if not os.path.exists(os.path.join(self.tmp_dir, "events")):
+            os.makedirs(os.path.join(self.tmp_dir, "events"))
+        filename = os.path.join(self.tmp_dir, "events",
+                                ustr(int(time.time() * 1000000))+".tld")
+        open(filename, 'w').close()
+        return filename
 
 
 class TestWireClient(HttpRequestPredicates, AgentTestCase):

@@ -46,6 +46,7 @@ class TestExtensionTelemetryHandler(AgentTestCase, HttpRequestPredicates):
     _WELL_FORMED_FILES = os.path.join(_TEST_DATA_DIR, "well_formed_files")
     _MALFORMED_FILES = os.path.join(_TEST_DATA_DIR, "malformed_files")
     _MIX_FILES = os.path.join(_TEST_DATA_DIR, "mix_files")
+    _NON_EXT_FILES = os.path.join(_TEST_DATA_DIR, "non_ext_files")
 
     # To make tests more versatile, include this key in a test event to mark that event as a bad event.
     # This event will then be skipped and will not be counted as a good event. This is purely for testing purposes,
@@ -138,8 +139,8 @@ class TestExtensionTelemetryHandler(AgentTestCase, HttpRequestPredicates):
 
     @staticmethod
     def _get_param_from_events(event_list):
-        for event in event_list:
-            for param in event.parameters:
+        for event_record in event_list:
+            for param in event_record.event.parameters:
                 yield param
 
     @staticmethod
@@ -166,15 +167,15 @@ class TestExtensionTelemetryHandler(AgentTestCase, HttpRequestPredicates):
 
     @contextlib.contextmanager
     def _create_extension_telemetry_processor(self, telemetry_handler=None):
-
-        event_list = []
-        if not telemetry_handler:
-            telemetry_handler = MagicMock(autospec=True)
-            telemetry_handler.stopped = MagicMock(return_value=False)
-            telemetry_handler.enqueue_event = MagicMock(wraps=event_list.append)
-        extension_telemetry_processor = _ProcessExtensionEvents(telemetry_handler)
-        extension_telemetry_processor.event_list = event_list
-        yield extension_telemetry_processor
+        with patch("azurelinuxagent.ga.collect_telemetry_events.NUM_OF_EVENT_FILE_RETRIES", 1):
+            event_list = []
+            if not telemetry_handler:
+                telemetry_handler = MagicMock(autospec=True)
+                telemetry_handler.stopped = MagicMock(return_value=False)
+                telemetry_handler.enqueue_event = MagicMock(wraps=event_list.append)
+            extension_telemetry_processor = _ProcessExtensionEvents(telemetry_handler)
+            extension_telemetry_processor.event_list = event_list
+            yield extension_telemetry_processor
 
     def _assert_handler_data_in_event_list(self, telemetry_events, ext_names_with_count, expected_count=None):
 
@@ -201,6 +202,16 @@ class TestExtensionTelemetryHandler(AgentTestCase, HttpRequestPredicates):
         self.assertGreaterEqual(count, min_count,
                                 "'{0}: {1}' param only found {2} times in events. Min_count required: {3}".format(
                                     param_key, param_value, count, min_count))
+
+    def _assert_handler_event_files_present_in_event_directory(self, ext_names, assert_check=True):
+        for ext_name in ext_names:
+            event_dir = os.path.join(conf.get_ext_log_dir(), ext_name, EVENTS_DIRECTORY)
+            if assert_check:
+                self.assertTrue(os.path.exists(event_dir), "Event dir for {0} not found".format(ext_name))
+                self.assertGreater(len(os.listdir(event_dir)), 0,  "Event files for {0} not found".format(ext_name))
+            else:
+                if os.path.exists(event_dir):
+                    self.assertEqual(len(os.listdir(event_dir)), 0, "Event files for {0} found".format(ext_name))
 
     @staticmethod
     def _is_string_in_event_body(event_body, expected_string):
@@ -248,6 +259,28 @@ class TestExtensionTelemetryHandler(AgentTestCase, HttpRequestPredicates):
 
             self._assert_handler_data_in_event_list(telemetry_events, extensions_with_count)
 
+    def test_it_should_remove_event_files_if_file_is_corrupted(self):
+        with self._create_extension_telemetry_processor() as extension_telemetry_processor:
+            bad_json_ext_with_count = self._create_random_extension_events_dir_with_events(2, os.path.join(
+                self._MALFORMED_FILES, "bad_json_files", "1591816395.json"))
+
+            extension_telemetry_processor.run()
+            telemetry_events = self._get_handlers_with_version(extension_telemetry_processor.event_list)
+
+            self._assert_handler_data_in_event_list(telemetry_events, bad_json_ext_with_count, expected_count=0)
+            self._assert_handler_event_files_present_in_event_directory(bad_json_ext_with_count, assert_check=False)
+
+    def test_ensure_non_ext_files_removed_after_every_run(self):
+        with self._create_extension_telemetry_processor() as extension_telemetry_processor:
+            non_ext_with_count = self._create_random_extension_events_dir_with_events(3, self._NON_EXT_FILES)
+            self._assert_handler_event_files_present_in_event_directory(non_ext_with_count, assert_check=True)
+
+            extension_telemetry_processor.run()
+
+            telemetry_events = self._get_handlers_with_version(extension_telemetry_processor.event_list)
+            self._assert_handler_data_in_event_list(telemetry_events, non_ext_with_count, expected_count=0)
+            self._assert_handler_event_files_present_in_event_directory(non_ext_with_count, assert_check=False)
+
     def test_it_should_limit_max_no_of_events_to_send_per_run_per_extension_and_report_event(self):
         max_events = 5
         with patch("azurelinuxagent.ga.collect_telemetry_events.add_log_event") as mock_event:
@@ -287,7 +320,6 @@ class TestExtensionTelemetryHandler(AgentTestCase, HttpRequestPredicates):
                 self._assert_param_in_events(extension_telemetry_processor.event_list,
                                              param_key=GuestAgentGenericLogsSchema.Context3, param_value=test_guid,
                                              min_count=no_of_extension*max_events)
-
 
     def test_it_should_parse_extension_event_irrespective_of_case(self):
         with self._create_extension_telemetry_processor() as extension_telemetry_processor:
@@ -440,30 +472,31 @@ class TestExtensionTelemetryHandler(AgentTestCase, HttpRequestPredicates):
                                  "The data for {0} and {1} doesn't map properly".format(telemetry_key,
                                                                                         extension_event_key))
 
-    def test_it_should_always_cleanup_files_on_good_and_bad_cases(self):
-        with self._create_extension_telemetry_processor() as extension_telemetry_processor:
-            extensions_with_count = self._create_random_extension_events_dir_with_events(2, os.path.join(
-                self._TEST_DATA_DIR, "large_messages"))
-            extensions_with_count.update(self._create_random_extension_events_dir_with_events(3, self._MALFORMED_FILES))
-            extensions_with_count.update(self._create_random_extension_events_dir_with_events(4, self._WELL_FORMED_FILES))
-            extensions_with_count.update(self._create_random_extension_events_dir_with_events(1, self._MIX_FILES))
+    def test_it_should_always_cleanup_random_files_bad_files_and_large_files(self):
+        with patch("azurelinuxagent.ga.collect_telemetry_events._ProcessExtensionEvents._EXTENSION_EVENT_FILE_MAX_SIZE",
+                   10000):
+            with self._create_extension_telemetry_processor() as extension_telemetry_processor:
+                extensions_with_count = self._create_random_extension_events_dir_with_events(2, os.path.join(
+                    self._TEST_DATA_DIR, "large_messages"))
+                extensions_with_count.update(self._create_random_extension_events_dir_with_events(3, os.path.join(
+                    self._MALFORMED_FILES, "bad_name_file.json")))
 
-            # Create random files in the events directory for each extension just to ensure that we delete them later
-            for handler_name in extensions_with_count.keys():
-                file_name = os.path.join(conf.get_ext_log_dir(), handler_name, EVENTS_DIRECTORY,
-                                         ''.join(random.sample(string.ascii_letters, 10)))
-                with open(file_name, 'a') as random_file:
-                    random_file.write('1*2*3' * 100)
+                # Create random files in the events directory for each extension just to ensure that we delete them later
+                for handler_name in extensions_with_count.keys():
+                    file_name = os.path.join(conf.get_ext_log_dir(), handler_name, EVENTS_DIRECTORY,
+                                             ''.join(random.sample(string.ascii_letters, 10)))
+                    with open(file_name, 'a') as random_file:
+                        random_file.write('1*2*3' * 100)
 
-            extension_telemetry_processor.run()
-            telemetry_events = self._get_handlers_with_version(extension_telemetry_processor.event_list)
+                extension_telemetry_processor.run()
+                telemetry_events = self._get_handlers_with_version(extension_telemetry_processor.event_list)
 
-            self._assert_handler_data_in_event_list(telemetry_events, extensions_with_count)
+                self._assert_handler_data_in_event_list(telemetry_events, extensions_with_count, expected_count=0)
 
-            for handler_name in extensions_with_count.keys():
-                events_path = os.path.join(conf.get_ext_log_dir(), handler_name, EVENTS_DIRECTORY)
-                self.assertTrue(os.path.exists(events_path), "{0} dir doesn't exist".format(events_path))
-                self.assertEqual(0, len(os.listdir(events_path)), "There should be no files inside the events dir")
+                for handler_name in extensions_with_count.keys():
+                    events_path = os.path.join(conf.get_ext_log_dir(), handler_name, EVENTS_DIRECTORY)
+                    self.assertTrue(os.path.exists(events_path), "{0} dir doesn't exist".format(events_path))
+                    self.assertEqual(0, len(os.listdir(events_path)), "There should be no files inside the events dir")
 
     def test_it_should_skip_unwanted_parameters_in_event_file(self):
         extra_params = ["SomethingNewButNotCool", "SomethingVeryWeird"]
@@ -550,7 +583,7 @@ class TestExtensionTelemetryHandler(AgentTestCase, HttpRequestPredicates):
 
             self.assertEqual(0, len(event_list), "No events should have been enqueued")
 
-    def test_it_should_not_delete_event_files_except_current_one_if_service_stopped_midway(self):
+    def test_it_should_not_delete_event_files_and_event_current_one_if_service_stopped_midway(self):
         event_list = []
         telemetry_handler = MagicMock(autospec=True)
         telemetry_handler.stopped = MagicMock(return_value=False)
@@ -558,8 +591,7 @@ class TestExtensionTelemetryHandler(AgentTestCase, HttpRequestPredicates):
                                                     wraps=event_list.append)
         no_of_extensions = 3
         # self._WELL_FORMED_FILES has 3 event files, i.e. total files for 3 extensions = 3 * 3 = 9
-        # But since we delete the file that we were processing last, expected count = 8
-        expected_event_file_count = 8
+        expected_event_file_count = 9
 
         with self._create_extension_telemetry_processor(telemetry_handler) as extension_telemetry_processor:
             ext_names = self._create_random_extension_events_dir_with_events(no_of_extensions, self._WELL_FORMED_FILES)

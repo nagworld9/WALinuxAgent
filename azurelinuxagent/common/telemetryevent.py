@@ -112,3 +112,10 @@ class TelemetryEvent(DataContract):
             if param.name == GuestAgentExtensionEventsSchema.Version:
                 return param.value
         return None
+
+
+class TelemetryEventRecord(object):
+    # This class is used to pass the event and the path to the event file to events queue.
+    def __init__(self, event, file_path=None):
+        self.event = event
+        self.file_path = file_path

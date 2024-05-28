@@ -55,6 +55,7 @@ class SendTelemetryEventsHandler(ThreadHandlerInterface):
         # Once we move add_event to directly queue events, we need to add a maxsize here to ensure some limitations are
         # being set (currently our limits are enforced by collector_threads but that would become obsolete once we
         # start enqueuing events directly).
+        # Now queue contains TelemetryEventRecord instance which has event and it's file path as attributes.
         self._queue = Queue()
 
     @staticmethod
@@ -150,7 +151,7 @@ class SendTelemetryEventsHandler(ThreadHandlerInterface):
             logger.verbose("Waiting for events to batch. Total events so far: {0}, Time elapsed: {1} secs",
                            self._queue.qsize()+1, (datetime.datetime.utcnow() - start_time).seconds)
             time.sleep(1)
-        # Delete files after sending the data rather than deleting and sending
+        # Event files deleted after sending the data
         self._protocol.report_event(self._get_events_in_queue(first_event))
 
     def _get_events_in_queue(self, first_event):

@@ -20,6 +20,7 @@ import datetime
 import json
 import os
 import re
+import time
 import threading
 from collections import defaultdict
 
@@ -33,11 +34,14 @@ from azurelinuxagent.common.exception import InvalidExtensionEventError, Service
 from azurelinuxagent.common.future import ustr
 from azurelinuxagent.ga.interfaces import ThreadHandlerInterface
 from azurelinuxagent.common.telemetryevent import TelemetryEvent, TelemetryEventParam, \
-    GuestAgentGenericLogsSchema, GuestAgentExtensionEventsSchema
+    GuestAgentGenericLogsSchema, GuestAgentExtensionEventsSchema, TelemetryEventRecord
 from azurelinuxagent.common.utils import textutil
 from azurelinuxagent.ga.exthandlers import HANDLER_NAME_PATTERN
 from azurelinuxagent.ga.periodic_operation import PeriodicOperation
 
+# Event file specific retries and delays.
+NUM_OF_EVENT_FILE_RETRIES = 3
+EVENT_FILE_RETRY_DELAY = 1  # seconds
 
 def get_collect_telemetry_events_handler(send_telemetry_events_handler):
     return CollectTelemetryEventsHandler(send_telemetry_events_handler)
@@ -99,7 +103,6 @@ class _ProcessExtensionEvents(PeriodicOperation):
                 self._send_telemetry_events_handler.get_thread_name()))
             return
 
-        delete_all_event_files = True
         extension_handler_with_event_dirs = []
 
         try:
@@ -116,16 +119,14 @@ class _ProcessExtensionEvents(PeriodicOperation):
         except ServiceStoppedError:
             # Since the service stopped, we should not delete the extension files and retry sending them whenever
             # the telemetry service comes back up
-            delete_all_event_files = False
+            logger.error("Unable to collect extension events as service stopped. Stopping collecting extension events")
         except Exception as error:
             msg = "Unknown error occurred when trying to collect extension events:{0}".format(
                 textutil.format_exception(error))
             add_event(op=WALAEventOperation.ExtensionTelemetryEventProcessing, message=msg, is_success=False)
         finally:
-            # Always ensure that the events directory are being deleted each run except when Telemetry Service is stopped,
-            # even if we run into an error and dont process them this run.
-            if delete_all_event_files:
-                self._ensure_all_events_directories_empty(extension_handler_with_event_dirs)
+            # Always ensure that the event files which are not extension events are removed from the events directory
+            self._ensure_cleanup_non_ext_events_in_all_directories(extension_handler_with_event_dirs)
 
     @staticmethod
     def _get_extension_events_dir_with_handler_name(extension_log_dir):
@@ -178,6 +179,9 @@ class _ProcessExtensionEvents(PeriodicOperation):
         captured_extension_events_count = 0
         dropped_events_with_error_count = defaultdict(int)
 
+        successfully_processed_event_files = set()
+        delete_skipped_event_files = True
+
         try:
             for event_file in event_files:
 
@@ -193,6 +197,8 @@ class _ProcessExtensionEvents(PeriodicOperation):
                                                                                          captured_extension_events_count,
                                                                                          dropped_events_with_error_count)
 
+                    successfully_processed_event_files.add(event_file)
+
                     # We only allow MAX_NUMBER_OF_EVENTS_PER_EXTENSION_PER_PERIOD=300 maximum events per period per handler
                     if captured_extension_events_count >= self._MAX_NUMBER_OF_EVENTS_PER_EXTENSION_PER_PERIOD:
                         msg = "Reached max count for the extension: {0}; Max Limit: {1}. Skipping the rest.".format(
@@ -202,19 +208,15 @@ class _ProcessExtensionEvents(PeriodicOperation):
                         break
                 except ServiceStoppedError:
                     # Not logging here as already logged once, re-raising
-                    # Since we already started processing this file, deleting it as we could've already sent some events out
-                    # This is a trade-off between data replication vs data loss.
+                    # Since service stop can happen any time, no guarantee that all files processed successfully. So considering re process again when service starts.
+                    # This is a trade-off between data duplication vs data loss.
+                    delete_skipped_event_files = False
                     raise
                 except Exception as error:
                     msg = "Failed to process event file {0}:{1}".format(event_file,
                                                                               textutil.format_exception(error))
                     logger.warn(msg)
                     add_log_event(level=logger.LogLevel.WARNING, message=msg, forced=True)
-                finally:
-                    # Todo: We should delete files after ensuring that we sent the data to Wireserver successfully
-                    # from our end rather than deleting first and sending later. This is to ensure the data reliability
-                    # of the agent telemetry pipeline.
-                    os.remove(event_file_path)
 
         finally:
             if dropped_events_with_error_count:
@@ -226,8 +228,17 @@ class _ProcessExtensionEvents(PeriodicOperation):
             if captured_extension_events_count > 0:
                 logger.info("Collected {0} events for extension: {1}".format(captured_extension_events_count, handler_name))
 
-    @staticmethod
-    def _ensure_all_events_directories_empty(extension_events_directories):
+            # remove the files that were not successfully processed, so that it doesn't get processed again
+            if delete_skipped_event_files:
+                for event_file in event_files:
+                    if event_file not in successfully_processed_event_files:
+                        event_file_path = os.path.join(handler_event_dir_path, event_file)
+                        try:
+                            os.remove(event_file_path)
+                        except Exception as error:
+                            logger.warn("Failed to remove file {0}: {1}".format(event_file_path, ustr(error)))
+
+    def _ensure_cleanup_non_ext_events_in_all_directories(self, extension_events_directories):
         if not extension_events_directories:
             return
 
@@ -237,10 +248,12 @@ class _ProcessExtensionEvents(PeriodicOperation):
                 return
 
             log_err = True
-            # Delete any residue files in the events directory
+            # Delete any residue files which are not ext events in the events directory
             for residue_file in os.listdir(event_dir_path):
                 try:
-                    os.remove(os.path.join(event_dir_path, residue_file))
+                    # remove files don't match the extension event file name regex
+                    if re.match(self._EXTENSION_EVENT_FILE_NAME_REGEX, residue_file) is None:
+                        os.remove(os.path.join(event_dir_path, residue_file))
                 except Exception as error:
                     # Only log the first error once per handler per run to keep the logfile clean
                     if log_err:
@@ -248,28 +261,46 @@ class _ProcessExtensionEvents(PeriodicOperation):
                                      ustr(error))
                         log_err = False
 
+    @staticmethod
+    def _read_event_file(event_file_path):
+        """
+        Read the event file and return the data.
+        :param event_file_path: Full path of the event file.
+        :return: Event data in list or string format.
+        """
+        # Retry for reading the event file in case file is modified while reading
+        error_count = 0
+        while True:
+            try:
+                # Read event file and decode it properly
+                with open(event_file_path, "rb") as event_file_descriptor:
+                    event_data = event_file_descriptor.read().decode("utf-8")
+
+                # Parse the string and get the list of events
+                return json.loads(event_data)
+            except Exception:
+                error_count += 1
+                if error_count >= NUM_OF_EVENT_FILE_RETRIES:
+                    raise
+            time.sleep(EVENT_FILE_RETRY_DELAY)
+
     def _enqueue_events_and_get_count(self, handler_name, event_file_path, captured_events_count,
                                       dropped_events_with_error_count):
 
         event_file_time = datetime.datetime.fromtimestamp(os.path.getmtime(event_file_path))
 
-        # Read event file and decode it properly
-        with open(event_file_path, "rb") as event_file_descriptor:
-            event_data = event_file_descriptor.read().decode("utf-8")
+        events = self._read_event_file(event_file_path)
 
-        # Parse the string and get the list of events
-        events = json.loads(event_data)
-
-        # We allow multiple events in a file but there can be an instance where the file only has a single
-        # JSON event and not a list. Handling that condition too
+        # We allow multiple events in a file but there can be an instance where the file only hasevents a single
+        # JSON event and not a list. Handling that condition tooevents
         if not isinstance(events, list):
             events = [events]
 
         for event in events:
             try:
-                self._send_telemetry_events_handler.enqueue_event(
-                    self._parse_telemetry_event(handler_name, event, event_file_time)
-                )
+                event = self._parse_telemetry_event(handler_name, event, event_file_time)
+                telemetry_event_record = TelemetryEventRecord(event, event_file_path)
+                self._send_telemetry_events_handler.enqueue_event(telemetry_event_record)
                 captured_events_count += 1
             except InvalidExtensionEventError as invalid_error:
                 # These are the errors thrown if there's an error parsing the event. We want to report these back to the
@@ -413,28 +444,25 @@ class _CollectAndEnqueueEvents(PeriodicOperation):
 
     def process_events(self):
         """
-        Returns a list of events that need to be sent to the telemetry pipeline and deletes the corresponding files
-        from the events directory.
+        Returns a list of events that need to be sent to the telemetry pipeline and removes the files that were skipped during processing.
         """
         event_directory_full_path = os.path.join(conf.get_lib_dir(), EVENTS_DIRECTORY)
         event_files = os.listdir(event_directory_full_path)
         debug_info = CollectOrReportEventDebugInfo(operation=CollectOrReportEventDebugInfo.OP_COLLECT)
+        successfully_processed_event_files = set()
+        delete_skipped_event_files = True
 
-        for event_file in event_files:
-            try:
-                match = EVENT_FILE_REGEX.search(event_file)
-                if match is None:
-                    continue
-
-                event_file_path = os.path.join(event_directory_full_path, event_file)
-
+        try:
+            for event_file in event_files:
                 try:
+                    match = EVENT_FILE_REGEX.search(event_file)
+                    if match is None:
+                        continue
+
+                    event_file_path = os.path.join(event_directory_full_path, event_file)
+
                     logger.verbose("Processing event file: {0}", event_file_path)
-
-                    with open(event_file_path, "rb") as event_fd:
-                        event_data = event_fd.read().decode("utf-8")
-
-                    event = parse_event(event_data)
+                    event = self._read_and_parse_event_file(event_file_path)
 
                     # "legacy" events are events produced by previous versions of the agent (<= 2.2.46) and extensions;
                     # they do not include all the telemetry fields, so we add them here
@@ -453,22 +481,52 @@ class _CollectAndEnqueueEvents(PeriodicOperation):
                             _CollectAndEnqueueEvents._update_legacy_agent_event(event,
                                                                                 event_file_creation_time)
 
-                    self._send_telemetry_events_handler.enqueue_event(event)
-                finally:
-                    # Todo: We should delete files after ensuring that we sent the data to Wireserver successfully
-                    # from our end rather than deleting first and sending later. This is to ensure the data reliability
-                    # of the agent telemetry pipeline.
-                    os.remove(event_file_path)
-            except ServiceStoppedError as stopped_error:
-                logger.error(
-                    "Unable to enqueue events as service stopped: {0}, skipping events collection".format(
-                        ustr(stopped_error)))
-            except UnicodeError as uni_err:
-                debug_info.update_unicode_error(uni_err)
-            except Exception as error:
-                debug_info.update_op_error(error)
+                    telemetry_event_record = TelemetryEventRecord(event, event_file_path)
+                    self._send_telemetry_events_handler.enqueue_event(telemetry_event_record)
+                    successfully_processed_event_files.add(event_file)
 
-        debug_info.report_debug_info()
+                except ServiceStoppedError as stopped_error:
+                    logger.error(
+                        "Unable to enqueue events as service stopped: {0}, stopping events collection".format(
+                            ustr(stopped_error)))
+                    # Since the service stopped, we should not delete the event files(as we may not have proceesed them) and retry sending them whenever
+                    # the telemetry service comes back up
+                    delete_skipped_event_files = False
+                except UnicodeError as uni_err:
+                    debug_info.update_unicode_error(uni_err)
+                except Exception as error:
+                    debug_info.update_op_error(error)
+
+            debug_info.report_debug_info()
+        finally:
+            # remove the files those skipped during process, so that it doesn't get processed again
+            if delete_skipped_event_files:
+                for event_file in event_files:
+                    if event_file not in successfully_processed_event_files:
+                        event_file_path = os.path.join(event_directory_full_path, event_file)
+                        try:
+                            os.remove(event_file_path)
+                        except Exception as error:
+                            logger.warn("Failed to remove file {0}: {1}".format(event_file_path, ustr(error)))
+
+    def _read_and_parse_event_file(self, event_file_path):
+        """
+        Read the event file and parse it to a TelemetryEvent object.
+        :param event_file_path: Full path of the event file.
+        :return: TelemetryEvent object.
+        """
+        # Retry for reading the event file in case file is modified while reading
+        error_count = 0
+        while True:
+            try:
+                with open(event_file_path, "rb") as event_fd:
+                    event_data = event_fd.read().decode("utf-8")
+                return parse_event(event_data)
+            except Exception:
+                error_count += 1
+                if error_count >= NUM_OF_EVENT_FILE_RETRIES:
+                    raise
+            time.sleep(EVENT_FILE_RETRY_DELAY)
 
     @staticmethod
     def _update_legacy_agent_event(event, event_creation_time):

@@ -23,7 +23,7 @@ import shutil
 import time
 import zipfile
 
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from xml.sax import saxutils
 
@@ -44,6 +44,7 @@ from azurelinuxagent.common.protocol.restapi import DataContract, ProvisionStatu
 from azurelinuxagent.common.telemetryevent import GuestAgentExtensionEventsSchema
 from azurelinuxagent.common.utils import fileutil, restutil
 from azurelinuxagent.common.utils.cryptutil import CryptUtil
+from azurelinuxagent.common.utils.restutil import RETRY_CODES_FOR_TELEMETRY
 from azurelinuxagent.common.utils.textutil import parse_doc, findall, find, \
     findtext, gettext, remove_bom, get_bytes_from_pem, parse_json
 from azurelinuxagent.common.version import AGENT_NAME, CURRENT_VERSION
@@ -61,6 +62,11 @@ SHORT_WAITING_INTERVAL = 1  # 1 second
 MAX_EVENT_BUFFER_SIZE = 2 ** 16 - 2 ** 10
 
 _DOWNLOAD_TIMEOUT = timedelta(minutes=5)
+
+# telemetrydata api max calls per 15 secs
+TELEMETRY_MAX_CALLS_PER_INTERVAL = 12
+TELEMETRY_INTERVAL = 15  # 15 seconds
+TELEMETRY_DELAY = 1  # 1 second
 
 
 class UploadError(HttpError):
@@ -129,8 +135,8 @@ class WireProtocol(DataContract):
         self.client.status_blob.set_vm_status(vm_status)
         self.client.upload_status_blob()
 
-    def report_event(self, events_iterator):
-        self.client.report_event(events_iterator)
+    def report_event(self, events_iterator, immediate_flush=False):
+        return self.client.report_event(events_iterator, immediate_flush)
 
     def upload_logs(self, logs):
         self.client.upload_logs(logs)
@@ -535,6 +541,7 @@ class WireClient(object):
         self._goal_state = None
         self._host_plugin = None
         self.status_blob = StatusBlob(self)
+        self.telemetry_api_calls_timestamps = deque()  # A thread-safe queue to store the timestamps of the telemetry API calls
 
     def get_endpoint(self):
         return self._endpoint
@@ -1032,7 +1039,22 @@ class WireClient(object):
                                  u",{0}: {1}").format(resp.status,
                                                       resp.read()))
 
-    def send_encoded_event(self, provider_id, event_str, encoding='utf8'):
+    def send_encoded_event(self, provider_id, event_str, immediate_flush, encoding='utf8'):
+        """
+        Construct the encoded event and url for telemetry api call
+        Before calling telemetry api, ensure calls under throttling limits and check if the number of telemetry api calls 12 in the last 15 seconds
+        (Considered 12 instead actual limit 15 as a conservative approach plus it helps for directly flushing events not causing throttling issues)
+        when immediate_flush is set to True, the events are sent out immediately without checking throttling limits to avoid any delay in sending the events
+        (Trade off between delay vs successful event delivery for immediate_flush events)
+        Note: throttling limit is 15 calls in 15 seconds
+        """
+        def can_make_wireserver_call():
+            current_time = datetime.utcnow()
+            fifteen_seconds_ago = current_time - timedelta(seconds=TELEMETRY_INTERVAL)
+            while self.telemetry_api_calls_timestamps and self.telemetry_api_calls_timestamps[0] < fifteen_seconds_ago:
+                self.telemetry_api_calls_timestamps.popleft()
+            return len(self.telemetry_api_calls_timestamps) < TELEMETRY_MAX_CALLS_PER_INTERVAL
+
         uri = TELEMETRY_URI.format(self.get_endpoint())
         data_format_header = ustr('<?xml version="1.0"?><TelemetryData version="1.0"><Provider id="{0}">').format(
             provider_id).encode(encoding)
@@ -1041,10 +1063,23 @@ class WireClient(object):
         # dividing it into parts.
         data = data_format_header + event_str + data_format_footer
         try:
-            header = self.get_header_for_xml_content()
             # NOTE: The call to wireserver requests utf-8 encoding in the headers, but the body should not
             #       be encoded: some nodes in the telemetry pipeline do not support utf-8 encoding.
-            resp = self.call_wireserver(restutil.http_post, uri, data, header)
+            header = self.get_header_for_xml_content()
+
+            # wait until throttling limit reset to make next call
+            while not immediate_flush and not can_make_wireserver_call():
+                next_call_time = self.telemetry_api_calls_timestamps[0] + timedelta(seconds=TELEMETRY_INTERVAL)
+                logger.verbose("Reached telemetry api throttling limit: {0}, so waiting to make next call after : {1}".format(TELEMETRY_MAX_CALLS_PER_INTERVAL, next_call_time))
+                time.sleep(TELEMETRY_DELAY)
+
+            current_time = datetime.utcnow()
+            self.telemetry_api_calls_timestamps.append(current_time)
+
+            # Since we have throttling limit and also retry logic to pick up the events in next iteration, we set max_retry to 1 on http call to prevent retries on errors.
+            # Currently, http_request has a logic to reset the max_retry to 26 on throttling errors, so
+            # setting specific retry codes(which doesn't include throttling codes) to avoid max_retry reset and that will prevent retry in http request on throttling errors
+            resp = self.call_wireserver(restutil.http_post, uri, data, header, max_retry=1, retry_codes=RETRY_CODES_FOR_TELEMETRY)
         except HttpError as e:
             raise ProtocolError("Failed to send events:{0}".format(e))
 
@@ -1053,22 +1088,42 @@ class WireClient(object):
             raise ProtocolError(
                 "Failed to send events:{0}".format(resp.status))
 
-    def report_event(self, events_iterator):
+    @staticmethod
+    def _delete_event_files(event_files_to_delete):
+        """
+        Deletes the event files that were created during the event generation process
+        """
+        for event_file_path in event_files_to_delete:
+            try:
+                os.remove(event_file_path)
+            except Exception as error:
+                logger.warn("Failed to delete event file: {0}", ustr(error))
+
+    def report_event(self, events_iterator, immediate_flush=False):
+        """
+        Report events to the wire server. The events are grouped and sent out in batches well with in the api body limit.
+        As soon as the events are sent out successfully, the event files deleted. If we fail to send we keep the files so that collector pick up in next iteration.
+        Note: Max body size is 64kb and throttling limit is 15 calls in 15 seconds
+        """
         buf = {}
+        event_files_to_delete = []
         debug_info = CollectOrReportEventDebugInfo(operation=CollectOrReportEventDebugInfo.OP_REPORT)
         events_per_provider = defaultdict(int)
 
-        def _send_event(provider_id, debug_info):
+        def _send_and_delete_event_files(provider_id, debug_info, immediate_flush):
             try:
-                self.send_encoded_event(provider_id, buf[provider_id])
+                self.send_encoded_event(provider_id, buf[provider_id], immediate_flush)
+                self._delete_event_files(event_files_to_delete)
             except UnicodeError as uni_error:
                 debug_info.update_unicode_error(uni_error)
             except Exception as error:
                 debug_info.update_op_error(error)
 
         # Group events by providerId
-        for event in events_iterator:
+        for event_record in events_iterator:
             try:
+                event = event_record.event
+                event_file_path = event_record.file_path
                 if event.providerId not in buf:
                     buf[event.providerId] = b""
                 event_str = event_to_v1_encoded(event)
@@ -1082,18 +1137,27 @@ class WireClient(object):
                     logger.periodic_warn(logger.EVERY_HALF_HOUR,
                                          "Single event too large: {0}, with the length: {1} more than the limit({2})"
                                          .format(str(details_of_event), len(event_str), MAX_EVENT_BUFFER_SIZE))
+                    # since we ignore this event we should remove file as well
+                    if event_file_path is not None:
+                        self._delete_event_files([event_file_path])
                     continue
 
                 # If buffer is full, send out the events in buffer and reset buffer
                 if len(buf[event.providerId] + event_str) >= MAX_EVENT_BUFFER_SIZE:
                     logger.verbose("No of events this request = {0}".format(events_per_provider[event.providerId]))
-                    _send_event(event.providerId, debug_info)
+                    _send_and_delete_event_files(event.providerId, debug_info, immediate_flush)
                     buf[event.providerId] = b""
                     events_per_provider[event.providerId] = 0
+                    # reset the list of event to delete every time we send out events
+                    event_files_to_delete = []
 
                 # Add encoded events to the buffer
                 buf[event.providerId] = buf[event.providerId] + event_str
                 events_per_provider[event.providerId] += 1
+
+                # When we process an event and add to buffer, we add the event file to the list of files to delete
+                if event_file_path is not None:
+                    event_files_to_delete.append(event_file_path)
 
             except Exception as error:
                 logger.warn("Unexpected error when generating Events:{0}", textutil.format_exception(error))
@@ -1102,9 +1166,12 @@ class WireClient(object):
         for provider_id in list(buf.keys()):
             if buf[provider_id]:
                 logger.verbose("No of events this request = {0}".format(events_per_provider[provider_id]))
-                _send_event(provider_id, debug_info)
+                _send_and_delete_event_files(provider_id, debug_info, immediate_flush)
 
         debug_info.report_debug_info()
+
+        # use debug info to determine if the operation was successful or not
+        return debug_info.has_no_errors()
 
     def report_status_event(self, message, is_success):
         report_event(op=WALAEventOperation.ReportStatus,
