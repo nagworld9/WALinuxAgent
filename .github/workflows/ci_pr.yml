@@ -94,6 +94,7 @@ jobs:
             additional-nose-opts: "--with-coverage --cover-erase --cover-inclusive --cover-branches --cover-package=azurelinuxagent"
           - python-version: "3.10"
           - python-version: "3.11"
+          - python-version: "3.12"
 
     name: "Python ${{ matrix.python-version }} Unit Tests"
     runs-on: ubuntu-20.04
