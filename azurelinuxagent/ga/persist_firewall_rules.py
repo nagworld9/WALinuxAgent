@@ -200,7 +200,6 @@ if __name__ == '__main__':
             # Create unit file with default values
             self.__set_service_unit_file()
             # Reload systemd configurations when we setup the service for the first time to avoid systemctl warnings
-            self.__reload_systemd_conf()
             logger.info("Successfully added and enabled the {0}".format(self._network_setup_service_name))
 
     def __setup_binary_file(self):
