@@ -29,8 +29,6 @@ import time
 import uuid
 from datetime import datetime, timedelta
 
-from debian.debtags import output
-
 from azurelinuxagent.common import conf
 from azurelinuxagent.common import logger
 from azurelinuxagent.common.utils import fileutil, textutil
