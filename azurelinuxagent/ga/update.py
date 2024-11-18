@@ -29,6 +29,8 @@ import time
 import uuid
 from datetime import datetime, timedelta
 
+from debian.debtags import output
+
 from azurelinuxagent.common import conf
 from azurelinuxagent.common import logger
 from azurelinuxagent.common.utils import fileutil, textutil
@@ -1141,6 +1143,7 @@ class UpdateHandler(object):
                 shellutil.run_command(command)
                 return True
             except CommandError as err:
+                logger.info("Error while iptable check command execution {0} : {1}".format(command, ustr(err)))
                 # return code 1 is expected while using the check command. Raise if encounter any other return code
                 if err.returncode != 1:
                     raise
@@ -1148,6 +1151,9 @@ class UpdateHandler(object):
 
         try:
             wait = self.osutil.get_firewall_will_wait()
+
+            out = shellutil.run_command(["iptables", "-t", "security", "-L", "-nxv", wait])
+            logger.info("Current Firewall rules before env thread start: \n{0}".format(out))
 
             # "-C" checks if the iptable rule is available in the chain. It throws an exception with return code 1 if the ip table rule doesnt exist
             drop_rule = AddFirewallRules.get_wire_non_root_drop_rule(AddFirewallRules.CHECK_COMMAND, dst_ip, wait=wait)

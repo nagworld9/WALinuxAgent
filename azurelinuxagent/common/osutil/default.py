@@ -232,6 +232,7 @@ class DefaultOSUtil(object):
             try:
                 rc = shellutil.run_command(rule)  # pylint: disable=W0612
             except CommandError as e:
+                logger.info("Error while deleting rule {0} : {1}".format(rule, ustr(e)))
                 if e.returncode == 1:
                     return
                 if e.returncode == 2:
