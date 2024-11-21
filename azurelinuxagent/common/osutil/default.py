@@ -228,6 +228,7 @@ class DefaultOSUtil(object):
         Continually execute the delete operation until the return
         code is non-zero or the limit has been reached.
         """
+        logger.info("Deleting rule: {0}".format(rule))
         for i in range(1, 100):  # pylint: disable=W0612
             try:
                 rc = shellutil.run_command(rule)  # pylint: disable=W0612
@@ -297,6 +298,7 @@ class DefaultOSUtil(object):
             try:
                 missing_rules.extend(AddFirewallRules.get_missing_iptables_rules(wait, dst_ip, uid))
                 if len(missing_rules) > 0:
+                    logger.info("Missing rules: {0}".format(missing_rules))
                     self.remove_firewall(dst_ip, uid, wait)
                     AddFirewallRules.add_iptables_rules(wait, dst_ip, uid)
             except CommandError as e:
