@@ -23,7 +23,7 @@ parameters:
       - waagenttests.gov
 
 pool:
-  name: waagent-pool
+  name: waagent-pool-test
 
 steps:
   - ${{ each service_connection in parameters.service_connections }}:
