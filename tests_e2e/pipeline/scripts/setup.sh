@@ -5,6 +5,7 @@ set -euox pipefail
 # Add delay per Azure Pipelines documentation
 sleep 30
 
+sudo tdnf clean all -y
 sudo tdnf update -y
 
 # Install Azure CLI
