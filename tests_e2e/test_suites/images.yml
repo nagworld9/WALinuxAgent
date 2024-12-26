@@ -131,6 +131,7 @@ images:
    debian_9: "credativ Debian 9 latest"
    debian_10: "Debian debian-10 10 latest"
    debian_11: "Debian debian-11 11 latest"
+   debian_13: "Debian debian-13-daily 13 latest"
    debian_11_arm64:
       urn: "Debian debian-11 11-backports-arm64 latest"
       locations:
