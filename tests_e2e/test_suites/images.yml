@@ -21,6 +21,7 @@ image-sets:
       - "mariner_2"
       - "azure-linux_3"
       - "azure-linux_3_fips"
+      - "oracle_94"
       - "suse_15"
       - "rhel_79"
       - "rhel_82"
@@ -171,6 +172,11 @@ images:
          AzureChinaCloud: []
    oracle_82:
       urn: "Oracle Oracle-Linux ol82-gen2 latest"
+      locations:
+         AzureChinaCloud: []
+         AzureUSGovernment: []
+   oracle_94:
+      urn: "Oracle Oracle-Linux ol94-lvm-gen2 latest"
       locations:
          AzureChinaCloud: []
          AzureUSGovernment: []
