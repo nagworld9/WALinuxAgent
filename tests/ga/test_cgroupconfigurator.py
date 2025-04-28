@@ -95,6 +95,22 @@ class CGroupConfiguratorSystemdTestCase(AgentTestCase):
         with self._get_cgroup_configurator_v2() as configurator:
             self.assertFalse(configurator.enabled(), "cgroups were enabled")
 
+    def test_should_cleanup_and_reset_cpu_quota_if_agent_cgroups_not_enabled(self):
+        with self._get_cgroup_configurator_v2(initialize=False) as configurator:
+            agent_drop_in_file_cpu_quota = configurator.mocks.get_mapped_path(UnitFilePaths.cpu_quota)
+
+            # The mock creates the drop-in file
+            configurator.mocks.add_data_file(os.path.join(data_dir, 'init', "12-CPUQuota.conf"), UnitFilePaths.cpu_quota)
+            self.assertTrue(os.path.exists(agent_drop_in_file_cpu_quota), "{0} was not created".format(agent_drop_in_file_cpu_quota))
+
+            configurator.initialize()
+
+            self.assertFalse(configurator.enabled(), "cgroups were enabled")
+            self.assertFalse(os.path.exists(agent_drop_in_file_cpu_quota), "{0} was not created".format(agent_drop_in_file_cpu_quota))
+            cmd = 'systemctl set-property walinuxagent.service CPUQuota'
+            self.assertIn(cmd, configurator.mocks.commands_call_list, "The command to reset the CPU quota was not called")
+
+
     def test_initialize_should_not_enable_when_cgroup_api_cannot_be_determined(self):
         # Mock cgroup api to raise CGroupsException
         def mock_create_cgroup_api():
