@@ -522,7 +522,11 @@ class UpdateHandler(object):
 
                 goal_state = protocol.get_goal_state()
                 new_goal_state = self._goal_state is None or self._goal_state.extensions_goal_state.id != goal_state.extensions_goal_state.id
-
+                if self._goal_state is not None:
+                    event.info(WALAEventOperation.FetchGoalState,
+                               "_goal_state_id: {0}".format(self._goal_state.extensions_goal_state.id))
+                event.info(WALAEventOperation.FetchGoalState,
+                           "new_goal_state_id: {0}".format(goal_state.extensions_goal_state.id))
                 event.info(WALAEventOperation.FetchGoalState,
                            "new_goal_state: {0}".format(new_goal_state))
 
@@ -608,6 +612,11 @@ class UpdateHandler(object):
         """
         True if we are currently processing a new extensions goal state
         """
+        if self._goal_state is not None:
+            event.info(WALAEventOperation.FetchGoalState, "current_id:{0".format(self._goal_state.extensions_goal_state.id))
+            event.info(WALAEventOperation.FetchGoalState, "last_id:{0}".format(self._last_extensions_gs_id))
+            event.info(WALAEventOperation.FetchGoalState, "outdated:{0}".format(self._goal_state.extensions_goal_state.is_outdated))
+
         return self._goal_state is not None and self._goal_state.extensions_goal_state.id != self._last_extensions_gs_id and not self._goal_state.extensions_goal_state.is_outdated
 
     def _process_goal_state(self, exthandlers_handler, remote_access_handler, agent_update_handler):

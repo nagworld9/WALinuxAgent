@@ -278,6 +278,7 @@ class GoalState(object):
         # versions of the Agent, which used to download certificates from the WireServer on every goal state. Some customer applications
         # depend on this behavior (see https://github.com/Azure/WALinuxAgent/issues/2750).
         #
+        self.logger.info("current gs id:{0}", self._extensions_goal_state.id)
         if self._extensions_goal_state.source == GoalStateSource.FastTrack and self._goal_state_properties & GoalStateProperties.Certificates:
             self._check_and_download_missing_certs_on_disk()
 
