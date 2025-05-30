@@ -523,10 +523,18 @@ class UpdateHandler(object):
                 goal_state = protocol.get_goal_state()
                 new_goal_state = self._goal_state is None or self._goal_state.extensions_goal_state.id != goal_state.extensions_goal_state.id
 
+                event.info(WALAEventOperation.FetchGoalState,
+                           "new_goal_state: {0}".format(new_goal_state))
+
                 if not new_goal_state or goal_state.extensions_goal_state.source != GoalStateSource.FastTrack:
                     break
 
-                if self._check_certificates(goal_state):
+                check_cert = self._check_certificates(goal_state)
+
+                event.info(WALAEventOperation.FetchGoalState,
+                           "check_cert: {0}".format(check_cert))
+
+                if check_cert:
                     if attempt > 0:
                         event.info(WALAEventOperation.FetchGoalState, "The extensions goal state is now in sync with the tenant cert.")
                     break
@@ -578,6 +586,10 @@ class UpdateHandler(object):
                 if settings.protectedSettings is None:
                     continue
                 certificates = goal_state.certs.summary
+                event.info(
+                    WALAEventOperation.FetchGoalState,
+                    "{0}, {1}",
+                    settings.certificateThumbprint, certificates)
                 if not any(settings.certificateThumbprint == c['thumbprint'] for c in certificates):
                     event.warn(
                         WALAEventOperation.FetchGoalState,
