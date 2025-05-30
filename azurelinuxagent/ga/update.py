@@ -613,7 +613,7 @@ class UpdateHandler(object):
         True if we are currently processing a new extensions goal state
         """
         if self._goal_state is not None:
-            event.info(WALAEventOperation.FetchGoalState, "current_id:{0".format(self._goal_state.extensions_goal_state.id))
+            event.info(WALAEventOperation.FetchGoalState, "current_id:{0}".format(self._goal_state.extensions_goal_state.id))
             event.info(WALAEventOperation.FetchGoalState, "last_id:{0}".format(self._last_extensions_gs_id))
             event.info(WALAEventOperation.FetchGoalState, "outdated:{0}".format(self._goal_state.extensions_goal_state.is_outdated))
 
