@@ -554,6 +554,9 @@ class UpdateHandler(object):
 
             self._goal_state = protocol.get_goal_state()
 
+            event.info(WALAEventOperation.FetchGoalState,
+                       "self._goal_state_id: {0}".format(self._goal_state.extensions_goal_state.id))
+
             if self._update_goal_state_error_count > 0:
                 event.info(
                     WALAEventOperation.FetchGoalState,
