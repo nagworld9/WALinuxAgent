@@ -24,6 +24,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import tempfile
 import sys
 import time
 import uuid
@@ -40,6 +41,7 @@ from azurelinuxagent.ga.cgroupconfigurator import CGroupConfigurator
 from azurelinuxagent.common.event import add_event, initialize_event_logger_vminfo_common_parameters_and_protocol, \
     WALAEventOperation, EVENTS_DIRECTORY
 from azurelinuxagent.common.exception import ExitException, AgentUpgradeExitException, AgentMemoryExceededException
+from azurelinuxagent.ga.extensionprocessutil import TELEMETRY_MESSAGE_MAX_LEN
 from azurelinuxagent.ga.firewall_manager import FirewallManager, FirewallStateError
 from azurelinuxagent.common.future import ustr, UTC, datetime_min_utc
 from azurelinuxagent.common.osutil import get_osutil, systemd
@@ -140,6 +142,8 @@ class UpdateHandler(object):
         self.child_launch_attempts = 0
         self.child_process = None
 
+        self.child_process_launch_error = ""
+
         self.signal_handler = None
 
         self._last_telemetry_heartbeat = None
@@ -227,31 +231,7 @@ class UpdateHandler(object):
 
             self._evaluate_agent_health(latest_agent)
 
-            self.child_process = subprocess.Popen(
-                cmds,
-                cwd=agent_dir,
-                stdout=sys.stdout,
-                stderr=sys.stderr,
-                env=os.environ)
-
-            logger.verbose(u"Agent {0} launched with command '{1}'", agent_name, agent_cmd)
-
-            # Setting the poll interval to poll every second to reduce the agent provisioning time;
-            # The daemon shouldn't wait for 60secs before starting the ext-handler in case the
-            # ext-handler kills itself during agent-update during the first 15 mins (CHILD_HEALTH_INTERVAL)
-            poll_interval = 1
-
-            ret = None
-            start_time = time.time()
-            while (time.time() - start_time) < CHILD_HEALTH_INTERVAL:
-                time.sleep(poll_interval)
-                try:
-                    ret = self.child_process.poll()
-                except OSError:
-                    # if child_process has terminated, calling poll could raise an exception
-                    ret = -1
-                if ret is not None:
-                    break
+            self.child_process, ret, self.child_process_launch_error = self._launch_child_process(cmds, agent_dir, agent_name)
 
             if ret is None or ret <= 0:
                 msg = u"Agent {0} launched with command '{1}' is successfully running".format(
@@ -274,12 +254,19 @@ class UpdateHandler(object):
                             agent_cmd,
                             ret)
                         logger.warn(msg)
+                        add_event(
+                            AGENT_NAME,
+                            version=agent_version,
+                            op=WALAEventOperation.Enable,
+                            is_success=False,
+                            message=msg)
 
             else:
-                msg = u"Agent {0} launched with command '{1}' failed with return code: {2}".format(
+                msg = u"Agent {0} launched with command '{1}' failed with return code: {2}. Error:\n {3}".format(
                     agent_name,
                     agent_cmd,
-                    ret)
+                    ret,
+                    self.child_process_launch_error)
                 logger.warn(msg)
                 add_event(
                     AGENT_NAME,
@@ -415,11 +402,13 @@ class UpdateHandler(object):
             logger.info(exitException.reason)
         except ExitException as exitException:
             logger.info(exitException.reason)
+            add_event(op=WALAEventOperation.AgentExited, message=exitException.reason, log_event=False)
         except Exception as error:
             msg = u"Agent {0} failed with exception: {1}".format(CURRENT_AGENT, ustr(error))
             self._set_sentinel(msg=msg)
             logger.warn(msg)
             logger.warn(textutil.format_exception(error))
+            add_event(op=WALAEventOperation.AgentExited, message=msg, log_event=False)
             sys.exit(1)
             # additional return here because sys.exit is mocked in unit tests
             return  # pylint: disable=unreachable
@@ -881,6 +870,70 @@ class UpdateHandler(object):
         configurator = CGroupConfigurator.get_instance()
         configurator.initialize()
 
+    def _launch_child_process(self, cmds, cwd, agent_name):
+        """
+        Launch the child process with the given command and working directory.
+
+        Args:
+            cmds (list): The command to execute as a list of arguments.
+            cwd (str): The working directory for the child process.
+            agent_name (str): The name of the agent being launched.
+
+        Returns:
+            tuple: A tuple containing:
+                - process (subprocess.Popen): The launched process object.
+                - return_code (int or None): The return code of the process if it exits, or None if still running.
+                - stderr_output (str): Captured stderr output during the early stages of the process.
+
+        Note:
+            - This method temporarily redirects `stderr` to a temporary file to capture any early error messages.
+            - The original `stderr` is restored after the process is launched.
+        """
+
+        with tempfile.TemporaryFile(mode="w+b") as tmp_stderr:
+            # Save original stderr fd
+            stderr_fd = sys.stderr.fileno()
+            saved_fd = os.dup(stderr_fd)
+
+            # Redirect stderr to the temp file
+            os.dup2(tmp_stderr.fileno(), stderr_fd)
+
+            process = subprocess.Popen(
+                cmds,
+                cwd=cwd,
+                stdout=sys.stdout,
+                stderr=sys.stderr,
+                env=os.environ)
+
+            logger.verbose("Agent {0} launched with command '{1}'".format( agent_name, " ".join(cmds)))
+
+            # Setting the poll interval to poll every second to reduce the agent provisioning time;
+            # The daemon shouldn't wait for 60secs before starting the ext-handler in case the
+            # ext-handler kills itself during agent-update during the first 15 mins (CHILD_HEALTH_INTERVAL)
+            poll_interval = 1
+
+            ret = None
+            start_time = time.time()
+            while (time.time() - start_time) < CHILD_HEALTH_INTERVAL:
+                time.sleep(poll_interval)
+                try:
+                    ret = process.poll()
+                except OSError:
+                    # if child_process has terminated, calling poll could raise an exception
+                    ret = -1
+                if ret is not None:
+                    break
+
+            # Restore original stderr
+            os.dup2(saved_fd, stderr_fd)
+            os.close(saved_fd)
+
+            # Read the content of the temp file (early stderr)
+            tmp_stderr.seek(0)
+            stderr = ustr(tmp_stderr.read(TELEMETRY_MESSAGE_MAX_LEN), encoding='utf-8', errors='ignore')
+
+            return process, ret, stderr
+
     def _evaluate_agent_health(self, latest_agent):
         """
         Evaluate the health of the selected agent: If it is restarting
@@ -902,10 +955,10 @@ class UpdateHandler(object):
 
         if (time.time() - self.child_launch_time) <= CHILD_LAUNCH_INTERVAL \
                 and self.child_launch_attempts >= CHILD_LAUNCH_RESTART_MAX:
-            msg = u"Agent {0} restarted more than {1} times in {2} seconds".format(
+            msg = u"Agent {0} restarted more than {1} times in {2} seconds. Last failure:\n {3}".format(
                 self.child_agent.name,
                 CHILD_LAUNCH_RESTART_MAX,
-                CHILD_LAUNCH_INTERVAL)
+                CHILD_LAUNCH_INTERVAL, self.child_process_launch_error)
             raise Exception(msg)
         return
 

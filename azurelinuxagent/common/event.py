@@ -70,6 +70,7 @@ class WALAEventOperation:
     ActivateResourceDisk = "ActivateResourceDisk"
     AgentDisabled = "AgentDisabled"
     AgentEnabled = "AgentEnabled"
+    AgentExited = "AgentExited"
     AgentMemory = "AgentMemory"
     AgentUpgrade = "AgentUpgrade"
     ArtifactsProfileBlob = "ArtifactsProfileBlob"
