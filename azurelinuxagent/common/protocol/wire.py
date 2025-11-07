@@ -813,6 +813,7 @@ class WireClient(object):
             self._host_plugin.update_container_id(container_id)
             self._host_plugin.update_role_config_name(role_config_name)
 
+    @profile
     def update_goal_state(self, force_update=False, silent=False, save_to_history=False):
         """
         Updates the goal state if the incarnation or etag changed
