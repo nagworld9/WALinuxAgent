@@ -32,9 +32,9 @@ from azurelinuxagent.common.exception import CGroupsException, ExtensionErrorCod
     ExtensionOperationError
 from azurelinuxagent.common.future import ustr
 from azurelinuxagent.common.osutil import systemd
+from azurelinuxagent.common.osutil.systemd import is_systemd_run_failure
 from azurelinuxagent.common.utils import fileutil, shellutil
-from azurelinuxagent.ga.extensionprocessutil import handle_process_completion, read_output, \
-    TELEMETRY_MESSAGE_MAX_LEN
+from azurelinuxagent.ga.extensionprocessutil import handle_process_completion, read_output
 from azurelinuxagent.common.utils.flexible_version import FlexibleVersion
 from azurelinuxagent.common.version import get_distro
 
@@ -392,7 +392,7 @@ class _SystemdCgroupApi(object):
         except ExtensionError as e:
             # The extension didn't terminate successfully. Determine whether it was due to systemd errors or
             # extension errors.
-            if not self._is_systemd_failure(scope, stderr):
+            if not is_systemd_run_failure(scope, stderr):
                 # There was an extension error; it either timed out or returned a non-zero exit code. Re-raise the error
                 raise
 
@@ -412,13 +412,6 @@ class _SystemdCgroupApi(object):
         finally:
             with self._systemd_run_commands_lock:
                 self._systemd_run_commands.remove(process.pid)
-
-    @staticmethod
-    def _is_systemd_failure(scope_name, stderr):
-        stderr.seek(0)
-        stderr = ustr(stderr.read(TELEMETRY_MESSAGE_MAX_LEN), encoding='utf-8', errors='backslashreplace')
-        unit_not_found = "Unit {0} not found.".format(scope_name)
-        return unit_not_found in stderr or scope_name not in stderr
 
 
 class SystemdCgroupApiv1(_SystemdCgroupApi):
