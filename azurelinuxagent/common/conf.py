@@ -535,6 +535,14 @@ def get_monitor_network_configuration_changes(conf=__conf__):
     return conf.get_switch("Monitor.NetworkConfigurationChanges", False)
 
 
+def get_monitor_kernel_soft_lockup(conf=__conf__):
+    return conf.get_switch("Monitor.KernelSoftLockup", True)
+
+
+def get_monitor_kernel_soft_lockup_period(conf=__conf__):
+    return conf.get_int("Monitor.KernelSoftLockupPeriod", 21600)
+
+
 def get_auto_update_to_latest_version(conf=__conf__):
     """
     If set to True, agent will update to the latest version

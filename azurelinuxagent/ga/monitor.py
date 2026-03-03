@@ -35,6 +35,7 @@ from azurelinuxagent.common.protocol.imds import get_imds_client
 from azurelinuxagent.common.protocol.util import get_protocol_util
 from azurelinuxagent.common.utils.restutil import IOErrorCounter
 from azurelinuxagent.common.version import AGENT_NAME, CURRENT_VERSION
+from azurelinuxagent.ga.kernel_event_monitor import MonitorKernelSoftLockup
 from azurelinuxagent.ga.periodic_operation import PeriodicOperation
 
 
@@ -306,6 +307,13 @@ class MonitorHandler(ThreadHandlerInterface):
             else:
                 logger.info("Monitor.NetworkConfigurationChanges is disabled.")
                 report_network_configuration_changes.log_network_configuration()
+
+            # Add kernel soft lockup monitoring if enabled
+            monitor_kernel_soft_lockup = MonitorKernelSoftLockup()
+            if conf.get_monitor_kernel_soft_lockup():
+                periodic_operations.append(monitor_kernel_soft_lockup)
+            else:
+                logger.info("Monitor.KernelSoftLockup is disabled.")
 
             while not self.stopped():
                 try:
