@@ -20,7 +20,7 @@ import json
 
 from azurelinuxagent.common.event import WALAEventOperation
 from azurelinuxagent.ga.kernel_event_monitor import MonitorKernelSoftLockup
-from tests.lib.tools import AgentTestCase, patch, MagicMock
+from tests.lib.tools import AgentTestCase, patch
 
 
 class TestMonitorKernelSoftLockup(AgentTestCase):
