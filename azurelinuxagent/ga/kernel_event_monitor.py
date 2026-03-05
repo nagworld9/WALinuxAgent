@@ -29,12 +29,12 @@ import datetime
 import json
 import os
 import re
-import subprocess
 
 import azurelinuxagent.common.conf as conf
 import azurelinuxagent.common.logger as logger
 from azurelinuxagent.common.event import add_event, WALAEventOperation
 from azurelinuxagent.common.future import ustr
+from azurelinuxagent.common.utils.shellutil import run_command
 from azurelinuxagent.common.version import AGENT_NAME
 from azurelinuxagent.ga.periodic_operation import PeriodicOperation
 
@@ -150,42 +150,13 @@ class MonitorKernelSoftLockup(PeriodicOperation):
 
     def _get_dmesg_output(self):
         """
-        Retrieve dmesg output from the kernel ring buffer.
-        Spawns 'dmesg' as a subprocess with a timeout guard. 
+        Retrieve dmesg output from the kernel ring buffer
 
         Returns:
             str: The dmesg output, or empty string on failure.
         """
-        process = None
         try:
-            process = subprocess.Popen(
-                ['dmesg'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            stdout, stderr = process.communicate(timeout=self._DMESG_TIMEOUT)
-
-            if process.returncode != 0:
-                logger.periodic_warn(
-                    logger.EVERY_HOUR,
-                    "KernelSoftLockup: dmesg command failed with return code {0}: {1}".format(
-                        process.returncode, ustr(stderr, encoding='utf-8', errors='replace')))
-                return ""
-
-            return ustr(stdout, encoding='utf-8', errors='replace')
-
-        except subprocess.TimeoutExpired:
-            if process is not None:
-                try:
-                    process.kill()
-                    process.communicate()
-                except Exception:
-                    pass  # process may have already exited
-            logger.periodic_warn(
-                logger.EVERY_HOUR,
-                "KernelSoftLockup: dmesg command timed out after {0} seconds".format(self._DMESG_TIMEOUT))
-            return ""
-
+            return run_command(['dmesg'], track_process=False, timeout=self._DMESG_TIMEOUT)
         except Exception as e:
             logger.periodic_warn(
                 logger.EVERY_HOUR,

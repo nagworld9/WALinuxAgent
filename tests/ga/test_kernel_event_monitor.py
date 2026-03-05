@@ -17,7 +17,6 @@
 #
 
 import json
-import subprocess
 
 from azurelinuxagent.common.event import WALAEventOperation
 from azurelinuxagent.ga.kernel_event_monitor import MonitorKernelSoftLockup
@@ -192,34 +191,12 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
 
     def test_get_dmesg_should_return_output_on_success(self):
         monitor = self._create_monitor()
-        with patch("subprocess.Popen") as mock_popen:
-            mock_process = MagicMock()
-            mock_process.communicate.return_value = (b"[0.000000] test line\n", b"")
-            mock_process.returncode = 0
-            mock_popen.return_value = mock_process
+        with patch("azurelinuxagent.ga.kernel_event_monitor.run_command", return_value="[0.000000] test line\n"):
             self.assertIn("test line", monitor._get_dmesg_output())
 
-    def test_get_dmesg_should_return_empty_on_nonzero_exit(self):
+    def test_get_dmesg_should_return_empty_on_command_failure(self):
         monitor = self._create_monitor()
-        with patch("subprocess.Popen") as mock_popen:
-            mock_process = MagicMock()
-            mock_process.communicate.return_value = (b"", b"dmesg: read kernel buffer failed")
-            mock_process.returncode = 1
-            mock_popen.return_value = mock_process
-            self.assertEqual(monitor._get_dmesg_output(), "")
-
-    def test_get_dmesg_should_return_empty_on_timeout(self):
-        monitor = self._create_monitor()
-        with patch("subprocess.Popen") as mock_popen:
-            mock_process = MagicMock()
-            mock_process.communicate.side_effect = subprocess.TimeoutExpired(cmd="dmesg", timeout=60)
-            mock_popen.return_value = mock_process
-            self.assertEqual(monitor._get_dmesg_output(), "")
-            self.assertEqual(mock_process.kill.call_count, 1)
-
-    def test_get_dmesg_should_return_empty_on_generic_exception(self):
-        monitor = self._create_monitor()
-        with patch("subprocess.Popen", side_effect=OSError("no such file")):
+        with patch("azurelinuxagent.ga.kernel_event_monitor.run_command", side_effect=Exception("command failed")):
             self.assertEqual(monitor._get_dmesg_output(), "")
 
     # -- Full operation ------------------------------------------------------
