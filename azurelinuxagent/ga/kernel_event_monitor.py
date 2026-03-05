@@ -89,8 +89,8 @@ class MonitorKernelSoftLockup(PeriodicOperation):
         self._event_aggregates = {}
         self._state_file_path = os.path.join(conf.get_lib_dir(), self._STATE_FILE_NAME)
         self._load_state()
-        logger.info("KernelSoftLockup: Initialized - period={0}s, watermark={1}, boot_id={2}",
-                    int(period.total_seconds()), self._last_processed_timestamp, self._boot_id[:8])
+        logger.info("KernelSoftLockup: Initialized - period={0}, watermark={1}, boot_id={2}",
+                    period, self._last_processed_timestamp, self._boot_id[:8])
 
     @staticmethod
     def _get_boot_id():
