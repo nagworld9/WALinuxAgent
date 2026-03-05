@@ -53,11 +53,11 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
     def _create_monitor(self, boot_id=None):
         if boot_id is None:
             boot_id = self._TEST_BOOT_ID
-        with patch("azurelinuxagent.ga.kernel_event_monitor.conf") as mock_conf, \
-             patch.object(MonitorKernelSoftLockup, "_get_boot_id", return_value=boot_id):
-            mock_conf.get_monitor_kernel_soft_lockup_period.return_value = 300
-            mock_conf.get_lib_dir.return_value = self.tmp_dir
-            monitor = MonitorKernelSoftLockup()
+        with patch("azurelinuxagent.ga.kernel_event_monitor.conf") as mock_conf:
+            with patch.object(MonitorKernelSoftLockup, "_get_boot_id", return_value=boot_id):
+                mock_conf.get_monitor_kernel_soft_lockup_period.return_value = 300
+                mock_conf.get_lib_dir.return_value = self.tmp_dir
+                monitor = MonitorKernelSoftLockup()
         return monitor
 
     # -- Regex ---------------------------------------------------------------
@@ -226,22 +226,22 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
 
     def test_operation_should_parse_and_report(self):
         monitor = self._create_monitor()
-        with patch.object(monitor, "_get_dmesg_output", return_value=self.SAMPLE_DMESG_WITH_LOCKUPS), \
-             patch("azurelinuxagent.ga.kernel_event_monitor.add_event") as mock_add_event:
-            monitor._operation()
-            mock_add_event.assert_called_once()
-            payload = json.loads(mock_add_event.call_args[1]["message"])
-            self.assertEqual(payload["totalSoftLockups"], 4)
-            self.assertEqual(payload["affectedCpuCount"], 3)
+        with patch.object(monitor, "_get_dmesg_output", return_value=self.SAMPLE_DMESG_WITH_LOCKUPS):
+            with patch("azurelinuxagent.ga.kernel_event_monitor.add_event") as mock_add_event:
+                monitor._operation()
+                mock_add_event.assert_called_once()
+                payload = json.loads(mock_add_event.call_args[1]["message"])
+                self.assertEqual(payload["totalSoftLockups"], 4)
+                self.assertEqual(payload["affectedCpuCount"], 3)
 
     def test_operation_watermark_persists_across_runs(self):
         """Second run with same dmesg should not report -- watermark filters old events."""
         monitor = self._create_monitor()
-        with patch.object(monitor, "_get_dmesg_output", return_value=self.SAMPLE_DMESG_WITH_LOCKUPS), \
-             patch("azurelinuxagent.ga.kernel_event_monitor.add_event"):
-            monitor._operation()
+        with patch.object(monitor, "_get_dmesg_output", return_value=self.SAMPLE_DMESG_WITH_LOCKUPS):
+            with patch("azurelinuxagent.ga.kernel_event_monitor.add_event"):
+                monitor._operation()
 
-        with patch.object(monitor, "_get_dmesg_output", return_value=self.SAMPLE_DMESG_WITH_LOCKUPS), \
-             patch("azurelinuxagent.ga.kernel_event_monitor.add_event") as mock_add_event:
-            monitor._operation()
-            mock_add_event.assert_not_called()
+        with patch.object(monitor, "_get_dmesg_output", return_value=self.SAMPLE_DMESG_WITH_LOCKUPS):
+            with patch("azurelinuxagent.ga.kernel_event_monitor.add_event") as mock_add_event:
+                monitor._operation()
+                mock_add_event.assert_not_called()

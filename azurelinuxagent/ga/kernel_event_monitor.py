@@ -56,7 +56,7 @@ class MonitorKernelSoftLockup(PeriodicOperation):
     #   "BUG: soft lockup - CPU#<id> stuck for <seconds>s! [<process>:<pid>]"
     #
     # The prefix before "BUG:" varies by kernel version (e.g., "watchdog:", "NMI watchdog:")
-    # but re.search() handles that — no prefix matching needed.
+    # but re.search() handles that, no prefix matching needed.
     _SOFT_LOCKUP_PATTERN = re.compile(
         r'BUG:\s*soft lockup\s*-\s*CPU#(\d+)\s+stuck for (\d+)s',
         re.IGNORECASE
@@ -209,7 +209,7 @@ class MonitorKernelSoftLockup(PeriodicOperation):
                 if kernel_timestamp <= self._last_processed_timestamp:
                     continue
 
-                # dmesg is chronological — advance watermark past every new line
+                # dmesg is chronological, advance watermark past every new line
                 self._last_processed_timestamp = kernel_timestamp
                 lockup_match = self._SOFT_LOCKUP_PATTERN.search(line)
                 if not lockup_match:
