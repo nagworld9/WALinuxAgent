@@ -112,24 +112,27 @@ class MonitorKernelSoftLockup(PeriodicOperation):
         reset the watermark since kernel timestamps restart from 0.
         """
         try:
-            if os.path.exists(self._state_file_path):
-                with open(self._state_file_path, 'r') as f:
-                    state = json.load(f)
-                    saved_boot_id = state.get("boot_id", "")
-                    
-                    if not saved_boot_id or not self._boot_id:
-                        logger.info("KernelSoftLockup: unable to read Boot ID (saved={0}, current={1}). "
-                                    "Resetting timestamp watermark as a safety measure.".format(
-                                        ustr(saved_boot_id)[:8], ustr(self._boot_id)[:8]))
-                        self._last_processed_timestamp = 0.0
-                    elif saved_boot_id != self._boot_id:
-                        logger.info("KernelSoftLockup: Boot ID changed (saved={0}, current={1}). "
-                                    "Resetting timestamp watermark due to reboot.".format(
-                                        ustr(saved_boot_id)[:8], ustr(self._boot_id)[:8]))
-                        self._last_processed_timestamp = 0.0
-                    else:
-                        saved_timestamp = state.get("last_timestamp", 0.0)
-                        self._last_processed_timestamp = float(saved_timestamp) if isinstance(saved_timestamp, (int, float)) else 0.0
+            if not os.path.exists(self._state_file_path):
+                return
+
+            with open(self._state_file_path, 'r') as f:
+                state = json.load(f)
+
+            saved_boot_id = state.get("boot_id", "")
+
+            if not saved_boot_id or not self._boot_id:
+                logger.info("KernelSoftLockup: Unable to read Boot ID (saved={0}, current={1}). "
+                            "Resetting timestamp watermark as a safety measure.".format(
+                                ustr(saved_boot_id)[:8], ustr(self._boot_id)[:8]))
+                return
+
+            if saved_boot_id != self._boot_id:
+                logger.info("KernelSoftLockup: Boot ID changed (saved={0}, current={1}). "
+                            "Resetting timestamp watermark due to reboot.".format(
+                                ustr(saved_boot_id)[:8], ustr(self._boot_id)[:8]))
+                return
+
+            self._last_processed_timestamp = float(state.get("last_timestamp", 0.0))
         except Exception as e:
             logger.warn("KernelSoftLockup: Failed to load state: {0}".format(ustr(e)))
             self._last_processed_timestamp = 0.0
@@ -150,7 +153,7 @@ class MonitorKernelSoftLockup(PeriodicOperation):
 
     def _get_dmesg_output(self):
         """
-        Retrieve dmesg output from the kernel ring buffer
+        Retrieve dmesg output from the kernel ring buffer.
 
         Returns:
             str: The dmesg output, or empty string on failure.
@@ -170,41 +173,34 @@ class MonitorKernelSoftLockup(PeriodicOperation):
         """
         found_timestamp = False
         for line in dmesg_output.split('\n'):
-            try:
-                timestamp_match = self._DMESG_TIMESTAMP_PATTERN.match(line)
-                if not timestamp_match:
-                    continue
+            timestamp_match = self._DMESG_TIMESTAMP_PATTERN.match(line)
+            if not timestamp_match:
+                continue
 
-                found_timestamp = True
-                kernel_timestamp = float(timestamp_match.group(1))
-                if kernel_timestamp <= self._last_processed_timestamp:
-                    continue
+            found_timestamp = True
+            kernel_timestamp = float(timestamp_match.group(1))
+            if kernel_timestamp <= self._last_processed_timestamp:
+                continue
 
-                # dmesg is chronological, advance watermark past every new line
-                self._last_processed_timestamp = kernel_timestamp
-                lockup_match = self._SOFT_LOCKUP_PATTERN.search(line)
-                if not lockup_match:
-                    continue
+            self._last_processed_timestamp = kernel_timestamp
+            lockup_match = self._SOFT_LOCKUP_PATTERN.search(line)
+            if not lockup_match:
+                continue
 
-                cpu_id = int(lockup_match.group(1))
-                stuck_seconds = int(lockup_match.group(2))
+            cpu_id = int(lockup_match.group(1))
+            stuck_seconds = int(lockup_match.group(2))
 
-                # --- Aggregation: bucket by CPU ---
-                if cpu_id not in self._event_aggregates:
-                    self._event_aggregates[cpu_id] = {
-                        "count": 0,
-                        "max_stuck_seconds": 0,
-                        "last_timestamp": kernel_timestamp
-                    }
+            if cpu_id not in self._event_aggregates:
+                self._event_aggregates[cpu_id] = {
+                    "count": 0,
+                    "max_stuck_seconds": 0,
+                    "last_timestamp": kernel_timestamp
+                }
 
-                agg = self._event_aggregates[cpu_id]
-                agg["count"] += 1
-                agg["max_stuck_seconds"] = max(agg["max_stuck_seconds"], stuck_seconds)
-                agg["last_timestamp"] = kernel_timestamp
-            except Exception as e:
-                logger.periodic_warn(
-                    logger.EVERY_HOUR,
-                    "KernelSoftLockup: Unexpected error parsing dmesg line: {0}".format(ustr(e)))
+            agg = self._event_aggregates[cpu_id]
+            agg["count"] += 1
+            agg["max_stuck_seconds"] = max(agg["max_stuck_seconds"], stuck_seconds)
+            agg["last_timestamp"] = kernel_timestamp
 
         if not found_timestamp:
             logger.periodic_warn(
@@ -217,7 +213,7 @@ class MonitorKernelSoftLockup(PeriodicOperation):
         """Report aggregated soft lockup events via telemetry."""
         if not self._event_aggregates:
             return
-        
+
         try:
             per_cpu = []
             total_events = 0
