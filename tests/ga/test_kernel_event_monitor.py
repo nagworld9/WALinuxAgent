@@ -118,7 +118,7 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
         with patch("azurelinuxagent.ga.kernel_event_monitor.add_event") as mock_add_event:
             monitor._report_events()
 
-            mock_add_event.assert_called_once()
+            self.assertEqual(mock_add_event.call_count, 1)
             call_kwargs = mock_add_event.call_args[1]
             self.assertEqual(call_kwargs["op"], WALAEventOperation.KernelSoftLockup)
             self.assertFalse(call_kwargs["is_success"])
@@ -215,7 +215,7 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
             mock_process.communicate.side_effect = subprocess.TimeoutExpired(cmd="dmesg", timeout=60)
             mock_popen.return_value = mock_process
             self.assertEqual(monitor._get_dmesg_output(), "")
-            mock_process.kill.assert_called_once()
+            self.assertEqual(mock_process.kill.call_count, 1)
 
     def test_get_dmesg_should_return_empty_on_generic_exception(self):
         monitor = self._create_monitor()
@@ -229,7 +229,7 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
         with patch.object(monitor, "_get_dmesg_output", return_value=self.SAMPLE_DMESG_WITH_LOCKUPS):
             with patch("azurelinuxagent.ga.kernel_event_monitor.add_event") as mock_add_event:
                 monitor._operation()
-                mock_add_event.assert_called_once()
+                self.assertEqual(mock_add_event.call_count, 1)
                 payload = json.loads(mock_add_event.call_args[1]["message"])
                 self.assertEqual(payload["totalSoftLockups"], 4)
                 self.assertEqual(payload["affectedCpuCount"], 3)
