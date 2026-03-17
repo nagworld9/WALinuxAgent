@@ -172,7 +172,8 @@ variable:
     value: {}
   - name: c_platform
     value: []
-
+  - name: c_transformer
+    value: []
   #
   # Name of the test environment, used for mainly for logging purposes
   #
@@ -214,6 +215,8 @@ variable:
   - name: c_is_vhd
     value: false
     is_case_visible: true
+
+transformer: $(c_transformer)
 
 environment: $(c_environment)
 

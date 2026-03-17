@@ -361,6 +361,25 @@ class AgentTestSuitesCombinator(Combinator):
         vm_tags = {}
         if self.runbook.allow_ssh != '':
             vm_tags["allow_ssh"] = self.runbook.allow_ssh
+
+        transformer = []
+        if vhd != "" and "arm64" in vhd.lower():
+            image_name = urllib.parse.urlparse(vhd).path.split('/')[-1]
+            transformer = [{
+                "type": "azure_sig",
+                "vhd": vhd,
+                "gallery_resource_group_name": "shared-images",
+                "gallery_name": "arm64-gallery",
+                "gallery_image_location": [location],
+                "gallery_image_hyperv_generation": 2,
+                "gallery_image_name": image_name,
+                "gallery_image_architecture": "Arm64",
+                "gallery_image_fullname": image_name,
+                "rename": {
+                    "azure_sig_url": shared_gallery
+                }
+            }]
+            vhd = ""
         environment = {
             "c_platform": [
                 {
@@ -395,6 +414,8 @@ class AgentTestSuitesCombinator(Combinator):
             ],
 
             "c_environment": None,
+
+            "c_transformer": transformer,
 
             "c_env_name": env_name,
             "c_test_suites": [test_suite_info],
