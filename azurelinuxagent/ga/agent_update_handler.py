@@ -197,6 +197,7 @@ class AgentUpdateHandler(object):
                 logger.info(msg)
                 add_event(op=WALAEventOperation.AgentUpgrade, message=msg, log_event=False)
 
+            self._updater.run_new_agent_health_check(agent)
             self._updater.purge_extra_agents_from_disk()
             self._updater.proceed_with_update()
 

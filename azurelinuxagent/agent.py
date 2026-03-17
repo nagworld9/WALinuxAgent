@@ -173,12 +173,12 @@ class Agent(object):
         print("Start {0} service".format(AGENT_NAME))
         self.osutil.start_agent_service()
 
-    def run_exthandlers(self, debug=False):
+    def run_exthandlers(self, debug=False, health_check=False):
         """
         Run the update and extension handler
         """
         logger.set_prefix("ExtHandler")
-        threading.current_thread().name = "ExtHandler"
+        threading.current_thread().name = "ExtHandler" if not health_check else "HealthCheck"
 
         #
         # Agents < 2.2.53 used to echo the log to the console. Since the extension handler could have been started by
@@ -196,7 +196,7 @@ class Agent(object):
 
         from azurelinuxagent.ga.update import get_update_handler
         update_handler = get_update_handler()
-        update_handler.run(debug)
+        update_handler.run(debug, health_check)
 
     def show_configuration(self):
         configuration = conf.get_configuration()
@@ -350,7 +350,7 @@ def main(args=None):
         args = []
     if len(args) <= 0:
         args = sys.argv[1:]
-    command, force, verbose, debug, conf_file_path, log_collector_full_mode, firewall_endpoint = parse_args(args)
+    command, force, verbose, debug, health_check, conf_file_path, log_collector_full_mode, firewall_endpoint = parse_args(args)
     if command == AgentCommands.Version:
         version()
     elif command == AgentCommands.Help:
@@ -371,7 +371,7 @@ def main(args=None):
             elif command == AgentCommands.Daemon:
                 agent.daemon()
             elif command == AgentCommands.RunExthandlers:
-                agent.run_exthandlers(debug)
+                agent.run_exthandlers(debug, health_check)
             elif command == AgentCommands.ShowConfig:
                 agent.show_configuration()
             elif command == AgentCommands.CollectLogs:
@@ -392,6 +392,7 @@ def parse_args(sys_args):
     force = False
     verbose = False
     debug = False
+    health_check = False
     conf_file_path = None
     log_collector_full_mode = False
     endpoint = None
@@ -430,6 +431,8 @@ def parse_args(sys_args):
             debug = True
         elif re.match(regex_cmd_format.format("force"), arg):
             force = True
+        elif re.match(regex_cmd_format.format("health-check"), arg):
+            health_check = True
         elif re.match(regex_cmd_format.format(AgentCommands.ShowConfig), arg):
             cmd = AgentCommands.ShowConfig
         elif re.match("^([-/]*)(help|usage|\\?)", arg):
@@ -445,10 +448,10 @@ def parse_args(sys_args):
                 cmd = AgentCommands.SetupFirewall
                 endpoint = match.group('endpoint')
             else:
-                cmd = AgentCommands.Help
-                break
+                print(usage())
+                sys.exit(1)
 
-    return cmd, force, verbose, debug, conf_file_path, log_collector_full_mode, endpoint
+    return cmd, force, verbose, debug, health_check, conf_file_path, log_collector_full_mode, endpoint
 
 
 def version():
@@ -472,7 +475,7 @@ def usage():
     s += ("usage: {0} [-verbose] [-force] [-help] "
            "-configuration-path:<path to configuration file>" 
            "-deprovision[+user]|-register-service|-version|-daemon|-start|"
-           "-run-exthandlers|-show-configuration|-collect-logs [-full]|-setup-firewall=<IP>]"
+           "-run-exthandlers [-health-check]|-show-configuration|-collect-logs [-full]|-setup-firewall=<IP>]"
            "").format(sys.argv[0])
     s += "\n"
     return s

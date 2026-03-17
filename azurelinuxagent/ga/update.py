@@ -325,12 +325,15 @@ class UpdateHandler(object):
         self.child_process = None
         return
 
-    def run(self, debug=False):
+    def run(self, debug=False, health_check=False):
         """
         This is the main loop which watches for agent and extension updates.
         """
 
         try:
+            if health_check:
+                logger.info("Running in health check mode......")
+                logger.info("The agent will perform protocol initialization, goal state fetching and then exit if successful.")
             logger.info("{0} (Goal State Agent version {1})", AGENT_LONG_NAME, AGENT_VERSION)
             logger.info("OS: {0} {1}", DISTRO_NAME, DISTRO_VERSION)
             logger.info("Python: {0}.{1}.{2}", PY_VERSION_MAJOR, PY_VERSION_MINOR, PY_VERSION_MICRO)
@@ -370,6 +373,10 @@ class UpdateHandler(object):
             #
             protocol = self.protocol_util.get_protocol(init_goal_state=False)
             self._initialize_goal_state(protocol)
+
+            if health_check:
+                logger.info("Health check completed successfully, exiting.")
+                sys.exit(0)
 
             # Initialize the common parameters for telemetry events
             initialize_event_logger_vminfo_common_parameters_and_protocol(protocol)
@@ -449,7 +456,8 @@ class UpdateHandler(object):
             logger.info(exitException.reason)
         except Exception as error:
             msg = u"Agent {0} failed with exception: {1}".format(CURRENT_AGENT, ustr(error))
-            self._set_sentinel(msg=msg)
+            if not health_check:
+                self._set_sentinel(msg=msg)
             logger.warn(msg)
             logger.warn(textutil.format_exception(error))
             sys.exit(1)

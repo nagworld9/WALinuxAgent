@@ -120,13 +120,13 @@ class TestAgent(AgentTestCase):
 
     def test_accepts_configuration_path(self):
         conf_path = os.path.join(data_dir, "test_waagent.conf")
-        c, f, v, d, cfp, lcm, _ = parse_args(["-configuration-path:" + conf_path])  # pylint: disable=unused-variable
+        c, f, v, d, hc, cfp, lcm, _ = parse_args(["-configuration-path:" + conf_path])  # pylint: disable=unused-variable
         self.assertEqual(cfp, conf_path)
 
     @patch("os.path.exists", return_value=True)
     def test_checks_configuration_path(self, mock_exists):
         conf_path = "/foo/bar-baz/something.conf"
-        c, f, v, d, cfp, lcm, _ = parse_args(["-configuration-path:"+conf_path])  # pylint: disable=unused-variable
+        c, f, v, d, hc, cfp, lcm, _ = parse_args(["-configuration-path:"+conf_path])  # pylint: disable=unused-variable
         self.assertEqual(cfp, conf_path)
         self.assertEqual(mock_exists.call_count, 1)
 
@@ -135,12 +135,12 @@ class TestAgent(AgentTestCase):
     @patch("sys.exit", side_effect=Exception)
     def test_rejects_missing_configuration_path(self, mock_exit, mock_exists, mock_stderr):  # pylint: disable=unused-argument
         try:
-            c, f, v, d, cfp, lcm, _ = parse_args(["-configuration-path:/foo/bar.conf"])  # pylint: disable=unused-variable
+            c, f, v, d, hc, cfp, lcm, _ = parse_args(["-configuration-path:/foo/bar.conf"])  # pylint: disable=unused-variable
         except Exception:
             self.assertEqual(mock_exit.call_count, 1)
 
     def test_configuration_path_defaults_to_none(self):
-        c, f, v, d, cfp, lcm, _ = parse_args([])  # pylint: disable=unused-variable
+        c, f, v, d, hc, cfp, lcm, _ = parse_args([])  # pylint: disable=unused-variable
         self.assertEqual(cfp, None)
 
     def test_agent_accepts_configuration_path(self):
@@ -217,12 +217,12 @@ class TestAgent(AgentTestCase):
 
     def test_checks_log_collector_mode(self):
         # Specify full mode
-        c, f, v, d, cfp, lcm, _ = parse_args(["-collect-logs", "-full"])  # pylint: disable=unused-variable
+        c, f, v, d, hc, cfp, lcm, _ = parse_args(["-collect-logs", "-full"])  # pylint: disable=unused-variable
         self.assertEqual(c, "collect-logs")
         self.assertEqual(lcm, True)
 
         # Defaults to None if mode not specified
-        c, f, v, d, cfp, lcm, _ = parse_args(["-collect-logs"])  # pylint: disable=unused-variable
+        c, f, v, d, hc, cfp, lcm, _ = parse_args(["-collect-logs"])  # pylint: disable=unused-variable
         self.assertEqual(c, "collect-logs")
         self.assertEqual(lcm, False)
 
@@ -230,7 +230,7 @@ class TestAgent(AgentTestCase):
     @patch("sys.exit", side_effect=Exception)
     def test_rejects_invalid_log_collector_mode(self, mock_exit, mock_stderr):  # pylint: disable=unused-argument
         try:
-            c, f, v, d, cfp, lcm, _ = parse_args(["-collect-logs", "-notvalid"])  # pylint: disable=unused-variable
+            c, f, v, d, hc, cfp, lcm, _ = parse_args(["-collect-logs", "-notvalid"])  # pylint: disable=unused-variable
         except Exception:
             self.assertEqual(mock_exit.call_count, 1)
 
@@ -495,19 +495,19 @@ class TestAgent(AgentTestCase):
             CollectLogsHandler.disable_monitor_cgroups_check()
 
     def test_it_should_parse_setup_firewall_properly(self):
-        cmd, _, _, _, _, _, wire_server_address = parse_args(["-{0}={1}".format(AgentCommands.SetupFirewall, "1.2.3.4")])
+        cmd, _, _, _, _, _, _, wire_server_address = parse_args(["-{0}={1}".format(AgentCommands.SetupFirewall, "1.2.3.4")])
 
         self.assertEqual(cmd, AgentCommands.SetupFirewall)
         self.assertEqual(wire_server_address, "1.2.3.4")
 
         # Defaults to None if command is different
-        cmd, _, _, _, _, _, wire_server_address = parse_args(["-{0}".format(AgentCommands.Help)])
+        cmd, _, _, _, _, _, _, wire_server_address = parse_args(["-{0}".format(AgentCommands.Help)])
         self.assertEqual(cmd, AgentCommands.Help)
         self.assertEqual(None, wire_server_address)
 
     def test_it_should_ignore_empty_arguments(self):
 
-        cmd, _, _, _, _, _, wire_server_address = parse_args(["-{0}={1}".format(AgentCommands.SetupFirewall, "1.2.3.4"), ""])
+        cmd, _, _, _, _, _, _, wire_server_address = parse_args(["-{0}={1}".format(AgentCommands.SetupFirewall, "1.2.3.4"), ""])
 
         self.assertEqual(cmd, AgentCommands.SetupFirewall)
         self.assertEqual(wire_server_address, "1.2.3.4")
@@ -528,6 +528,35 @@ class TestAgent(AgentTestCase):
         self.assertTrue("-run-exthandlers" in message)
         self.assertTrue("-show-configuration" in message)
         self.assertTrue("-collect-logs" in message)
+        self.assertTrue("-health-check" in message)
 
         # sanity check
         self.assertFalse("-not-a-valid-option" in message)
+
+    def test_parse_args_should_return_health_check_false_by_default(self):
+        cmd, _, _, _, health_check, _, _, _ = parse_args(["-run-exthandlers"])
+        self.assertEqual(cmd, "run-exthandlers")
+        self.assertFalse(health_check)
+
+    def test_parse_args_should_parse_health_check_flag(self):
+        cmd, _, _, _, health_check, _, _, _ = parse_args(["-run-exthandlers", "-health-check"])
+        self.assertEqual(cmd, "run-exthandlers")
+        self.assertTrue(health_check)
+
+    @patch("sys.exit")
+    @patch("sys.stderr")
+    def test_parse_args_should_exit_on_invalid_argument(self, _mock_stderr, mock_exit):
+        mock_exit.side_effect = SystemExit(1)
+        with self.assertRaises(SystemExit):
+            parse_args(["-invalid-argument"])
+        mock_exit.assert_called_once_with(1)
+
+    @patch("azurelinuxagent.ga.update.get_update_handler")
+    def test_run_exthandlers_should_pass_health_check_to_update_handler(self, mock_get_handler):
+        mock_handler = Mock()
+        mock_get_handler.return_value = mock_handler
+
+        agent = Agent(False, conf_file_path=data_dir + "/test_waagent.conf")
+        agent.run_exthandlers(debug=False, health_check=True)
+
+        mock_handler.run.assert_called_once_with(False, True)

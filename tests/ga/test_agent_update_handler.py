@@ -2,7 +2,9 @@ import contextlib
 import json
 import os
 import random
+import subprocess
 import time
+from unittest.mock import MagicMock
 
 from azurelinuxagent.common import conf
 from azurelinuxagent.common.event import WALAEventOperation
@@ -75,15 +77,23 @@ class TestAgentUpdate(UpdateTestCase):
                     return 0.001
                 return original_randint(a, b) + 10  # If none of the above conditions are met, the function returns additional 10-seconds delay. This might represent a normal delay for updates in scenarios where updates are not expected immediately
 
+            def dummy_popen(cmd, *args, **kwargs):
+                if "health-check" in " ".join(cmd if isinstance(cmd, list) else [cmd]):
+                    cmd = ["echo", "health-check"]
+                return original_popen(cmd, *args, **kwargs)
+
+            original_popen = subprocess.Popen
+
             with patch("azurelinuxagent.common.conf.get_autoupdate_enabled", return_value=autoupdate_enabled):
                 with patch("azurelinuxagent.common.conf.get_autoupdate_frequency", return_value=autoupdate_frequency):
                     with patch("azurelinuxagent.ga.self_update_version_updater.random.randint", side_effect=_mock_random_update_time):
                         with patch("azurelinuxagent.common.conf.get_autoupdate_gafamily", return_value="Prod"):
                             with patch("azurelinuxagent.common.conf.get_enable_ga_versioning", return_value=True):
                                 with patch("azurelinuxagent.common.event.EventLogger.add_event") as mock_telemetry:
-                                    agent_update_handler = get_agent_update_handler(protocol)
-                                    agent_update_handler._protocol = protocol
-                                    yield agent_update_handler, mock_telemetry
+                                    with patch("subprocess.Popen", side_effect=dummy_popen):
+                                        agent_update_handler = get_agent_update_handler(protocol)
+                                        agent_update_handler._protocol = protocol
+                                        yield agent_update_handler, mock_telemetry
 
     def _assert_agent_directories_available(self, versions):
         for version in versions:
@@ -704,3 +714,53 @@ class TestAgentUpdate(UpdateTestCase):
             self._assert_agent_rsm_version_in_goal_state(mock_telemetry, version="9.9.9.10")
             self._assert_agent_directories_exist_and_others_dont_exist(versions=["9.9.9.10", str(CURRENT_VERSION)])
             self._assert_agent_exit_process_telemetry_emitted(ustr(context.exception.reason))
+
+    def test_it_should_not_update_if_new_agent_health_check_fails(self):
+        data_file = DATA_FILE.copy()
+        data_file['ext_conf'] = "wire/ext_conf_rsm_version.xml"
+
+        def dummy_popen(cmd, *args, **kwargs):
+            if "health-check" in " ".join(cmd if isinstance(cmd, list) else [cmd]):
+                mock_process = MagicMock()
+                mock_process.communicate.return_value = (b"", b"error")
+                mock_process.returncode = -1
+                return mock_process
+            return original_popen(cmd, *args, **kwargs)
+
+        original_popen = subprocess.Popen
+        with self._get_agent_update_handler(test_data=data_file) as (agent_update_handler, mock_telemetry):
+            with patch("subprocess.Popen", side_effect=dummy_popen):
+                agent_update_handler.run(GoalState(agent_update_handler._protocol.client, GoalStateProperties.ExtensionsGoalState), True)
+                self._assert_agent_directories_exist_and_others_dont_exist(versions=["9.9.9.10"])
+                self.assertEqual(1, len([kwarg['message'] for _, kwarg in mock_telemetry.call_args_list if
+                                         "New agent: 9.9.9.10 failed health check" in kwarg['message'] and kwarg[
+                                             'op'] == WALAEventOperation.AgentUpgrade]), "Agent update should fail")
+                
+    def test_it_should_not_update_if_new_agent_health_check_times_out(self):
+        data_file = DATA_FILE.copy()
+        data_file['ext_conf'] = "wire/ext_conf_rsm_version.xml"
+
+        def dummy_popen(cmd, *args, **kwargs):
+            if "health-check" in " ".join(cmd if isinstance(cmd, list) else [cmd]):
+                mock_process = MagicMock()
+                mock_process.communicate.side_effect = subprocess.TimeoutExpired(cmd, timeout=360)
+                mock_process.kill.return_value = None
+                return mock_process
+            return original_popen(cmd, *args, **kwargs)
+
+        original_popen = subprocess.Popen
+        with self._get_agent_update_handler(test_data=data_file) as (agent_update_handler, mock_telemetry):
+            with patch("subprocess.Popen", side_effect=dummy_popen):
+                agent_update_handler.run(
+                    GoalState(agent_update_handler._protocol.client, GoalStateProperties.ExtensionsGoalState), True)
+
+                # Agent directory should still exist (not purged) but update should not proceed
+                self._assert_agent_directories_exist_and_others_dont_exist(versions=["9.9.9.10"])
+
+                # Verify health check failure telemetry was emitted
+                health_check_failures = [kwarg['message'] for _, kwarg in mock_telemetry.call_args_list if
+                                        "New agent: 9.9.9.10 failed health check" in kwarg['message'] and kwarg[
+                                            'op'] == WALAEventOperation.AgentUpgrade]
+                self.assertEqual(1, len(health_check_failures),
+                                "Expected health check timeout failure telemetry. Got: {0}".format(
+                                    mock_telemetry.call_args_list))

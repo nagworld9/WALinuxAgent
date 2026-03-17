@@ -19,16 +19,22 @@
 import glob
 import os
 import shutil
+import sys
 
 from azurelinuxagent.common import conf, logger
 from azurelinuxagent.common.exception import AgentUpdateError
 from azurelinuxagent.common.future import ustr
 from azurelinuxagent.common.protocol.extensions_goal_state import GoalStateSource
-from azurelinuxagent.common.utils import fileutil
+from azurelinuxagent.common.utils import fileutil, textutil, shellutil
 from azurelinuxagent.common.utils.flexible_version import FlexibleVersion
+from azurelinuxagent.common.utils.shellutil import CommandError
 from azurelinuxagent.common.version import AGENT_NAME, AGENT_DIR_PATTERN, CURRENT_VERSION
 from azurelinuxagent.ga.guestagent import GuestAgent, AGENT_MANIFEST_FILE
 
+# Set to version where feature is introduced
+# TODO: This needs to be updated depending on when the health check feature is introduced in the agent.
+AGENT_VERSION_WITH_HEALTH_CHECK = FlexibleVersion("2.16.0.0")
+HEALTH_CHECK_TIMEOUT_SECONDS = 360
 
 class GAVersionUpdater(object):
 
@@ -148,6 +154,42 @@ class GAVersionUpdater(object):
         """
         known_agents = [CURRENT_VERSION, self._version]
         self._purge_unknown_agents_from_disk(known_agents)
+
+    @staticmethod
+    def run_new_agent_health_check(new_agent):
+        """
+        Validates the new agent binary can function correctly by running health check before launching it.
+        @param new_agent: GuestAgent object
+        @raises: AgentUpdateError if validation fails
+        """
+        version = new_agent.version
+
+        # Skip health check for older versions that don't support it
+        if FlexibleVersion(version) < AGENT_VERSION_WITH_HEALTH_CHECK:
+            logger.info("Skipping health check for version {0} - feature not supported (requires {1}+)".format(
+                version, AGENT_VERSION_WITH_HEALTH_CHECK))
+            return
+        agent_cmd = new_agent.get_agent_cmd()
+        agent_dir = new_agent.get_agent_dir()
+        cmds = textutil.safe_shlex_split(agent_cmd)
+        if cmds[0].lower() == "python":
+            cmds[0] = sys.executable
+        for i in range(1, len(cmds)):
+            if ".egg" in cmds[i].lower():
+                cmds[i] = os.path.join(agent_dir, cmds[i])
+                break
+
+        cmds.append("-health-check")
+        try:
+            logger.info("Running health check for new agent: {0} before launch and command: {1}".format(version, cmds))
+            shellutil.run_command(cmds, timeout=HEALTH_CHECK_TIMEOUT_SECONDS)
+            logger.info("New agent: {0} passed health check".format(version))
+        except Exception as e:
+            err_msg = ustr(e)
+            if isinstance(e, CommandError):
+                err_msg = "Command '{0}' failed with exit code {1}".format(agent_cmd, e.returncode)
+            logger.error("New agent: {0} failed health check: {1}".format(version, err_msg))
+            raise AgentUpdateError("New agent: {0} failed health check: {1}".format(version, err_msg))
 
     def _get_agent_package_to_download(self, agent_manifest, version):
         """

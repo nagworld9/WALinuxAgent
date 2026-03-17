@@ -1262,6 +1262,46 @@ class TestUpdate(UpdateTestCase):
                     self.assertTrue(len(protocol_endpoint_events) == 1)
 
 
+class TestUpdateHandlerHealthCheck(AgentTestCase):
+
+    @patch("azurelinuxagent.ga.update.ConfidentialVMInfo")
+    @patch("azurelinuxagent.ga.update.get_osutil")
+    @patch("azurelinuxagent.ga.update.get_protocol_util")
+    def test_run_should_exit_successfully_after_goal_state_in_health_check_mode(
+            self, mock_protocol_util, mock_osutil, _mock_cvm_info):
+        mock_osutil.return_value.get_vm_arch.return_value = "x86_64"
+        mock_protocol = Mock()
+        mock_protocol_util.return_value.get_protocol.return_value = mock_protocol
+
+        update_handler = UpdateHandler()
+
+        with patch.object(update_handler, "_initialize_goal_state"):
+            with patch("sys.exit") as mock_exit:
+                mock_exit.side_effect = SystemExit(0)
+                with self.assertRaises(SystemExit):
+                    update_handler.run(debug=False, health_check=True)
+
+                mock_exit.assert_called_once_with(0)
+
+    @patch("azurelinuxagent.ga.update.ConfidentialVMInfo")
+    @patch("azurelinuxagent.ga.update.get_osutil")
+    @patch("azurelinuxagent.ga.update.get_protocol_util")
+    def test_run_should_exit_with_code_1_on_error_in_health_check_mode(
+            self, mock_protocol_util, mock_osutil, _mock_cvm_info):
+        mock_osutil.return_value.get_vm_arch.return_value = "x86_64"
+        mock_protocol_util.return_value.get_protocol.side_effect = Exception("Test error")
+
+        update_handler = UpdateHandler()
+
+        with patch("sys.exit") as mock_exit:
+            mock_exit.side_effect = SystemExit(1)
+            with self.assertRaises(SystemExit) as context:
+                update_handler.run(debug=False, health_check=True)
+
+            mock_exit.assert_called_with(1)
+            self.assertEqual(context.exception.code, 1)
+
+
 class TestUpdateWaitForCloudInit(AgentTestCase):
     @staticmethod
     @contextlib.contextmanager
