@@ -147,9 +147,7 @@ class MonitorKernelSoftLockup(PeriodicOperation):
             with open(self._state_file_path, 'w') as f:
                 json.dump(state, f)
         except Exception as e:
-            logger.periodic_warn(
-                logger.EVERY_HOUR,
-                "KernelSoftLockup: Failed to save state: {0}".format(ustr(e)))
+            logger.warn("KernelSoftLockup: Failed to save state: {0}".format(ustr(e)))
 
     def _get_dmesg_output(self):
         """
@@ -161,9 +159,7 @@ class MonitorKernelSoftLockup(PeriodicOperation):
         try:
             return run_command(['dmesg'], track_process=False, timeout=self._DMESG_TIMEOUT)
         except Exception as e:
-            logger.periodic_warn(
-                logger.EVERY_HOUR,
-                "KernelSoftLockup: Failed to read dmesg output: {0}".format(ustr(e)))
+            logger.warn("KernelSoftLockup: Failed to read dmesg output: {0}".format(ustr(e)))
             return ""
 
     def _parse_and_aggregate_soft_lockup_events(self, dmesg_output):
@@ -203,8 +199,7 @@ class MonitorKernelSoftLockup(PeriodicOperation):
             agg["last_timestamp"] = kernel_timestamp
 
         if not found_timestamp:
-            logger.periodic_warn(
-                logger.EVERY_HOUR,
+            logger.warn(
                 "KernelSoftLockup: No kernel timestamps found in dmesg output. "
                 "Kernel may have been built without CONFIG_PRINTK_TIME or timestamps are disabled (printk.time=0). "
                 "Soft lockup detection will not work without timestamps.")
@@ -245,9 +240,7 @@ class MonitorKernelSoftLockup(PeriodicOperation):
                 log_event=False
             )
         except Exception as e:
-            logger.periodic_warn(
-                logger.EVERY_HOUR,
-                "KernelSoftLockup: Failed to send telemetry event: {0}".format(ustr(e)))
+            logger.warn("KernelSoftLockup: Failed to send telemetry event: {0}".format(ustr(e)))
         finally:
             self._event_aggregates = {}
 
