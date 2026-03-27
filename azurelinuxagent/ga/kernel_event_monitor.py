@@ -144,8 +144,10 @@ class MonitorKernelSoftLockup(PeriodicOperation):
                 "last_timestamp": self._last_processed_timestamp,
                 "boot_id": self._boot_id
             }
-            with open(self._state_file_path, 'w') as f:
+            tmp_path = self._state_file_path + ".tmp"
+            with open(tmp_path, 'w') as f:
                 json.dump(state, f)
+            os.rename(tmp_path, self._state_file_path)
         except Exception as e:
             logger.warn("KernelSoftLockup: Failed to save state: {0}".format(ustr(e)))
 
@@ -157,6 +159,8 @@ class MonitorKernelSoftLockup(PeriodicOperation):
             str: The dmesg output, or empty string on failure.
         """
         try:
+            # run_command() ignores the timeout on Python 2
+            # dmesg reads from an in-memory ring buffer, so a hang is not expected.
             return run_command(['dmesg'], track_process=False, timeout=self._DMESG_TIMEOUT)
         except Exception as e:
             logger.warn("KernelSoftLockup: Failed to read dmesg output: {0}".format(ustr(e)))

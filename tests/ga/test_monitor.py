@@ -62,7 +62,7 @@ class MonitorHandlerTestCase(AgentTestCase):
             invoked_operations.append(self.__class__.__name__)
 
         with _mock_wire_protocol():
-            with patch("azurelinuxagent.ga.monitor.MonitorHandler.stopped", side_effect=[False, True, False, True, False, True, False, True]):
+            with patch("azurelinuxagent.ga.monitor.MonitorHandler.stopped", side_effect=[False, True] * 4):
                 with patch("time.sleep"):
                     with patch.object(PeriodicOperation, "run", side_effect=periodic_operation_run, autospec=True):
                         with patch("azurelinuxagent.common.conf.get_monitor_network_configuration_changes") as monitor_network_changes:
