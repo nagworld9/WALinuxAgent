@@ -17,12 +17,14 @@
 #
 
 from azurelinuxagent.common.osutil.default import DefaultOSUtil
+from azurelinuxagent.common.version import DISTRO_FULL_NAME
 
 
 class MarinerOSUtil(DefaultOSUtil):
     def __init__(self):
         super(MarinerOSUtil, self).__init__()
         self.jit_enabled = True
+        self.distro_full_name = DISTRO_FULL_NAME
 
     @staticmethod
     def get_systemd_unit_file_install_path():
@@ -42,6 +44,10 @@ class MarinerOSUtil(DefaultOSUtil):
         self._run_command_without_raising(["systemctl", "restart", "systemd-networkd"])
 
     def restart_ssh_service(self):
+        # ACL uses sshd.socket for socket-activated SSH (similar to Flatcar/CoreOS).
+        # Restarting sshd.service would conflict with the active sshd.socket.
+        if "azure container linux" in self.distro_full_name.lower():
+            return
         self._run_command_without_raising(["systemctl", "restart", "sshd"])
 
     def stop_dhcp_service(self):
