@@ -335,6 +335,11 @@ class UpdateHandler(object):
             logger.info("OS: {0} {1}", DISTRO_NAME, DISTRO_VERSION)
             logger.info("Python: {0}.{1}.{2}", PY_VERSION_MAJOR, PY_VERSION_MINOR, PY_VERSION_MICRO)
 
+            # Ensure state dir exists (may not be created by the daemon if it runs an older version)
+            state_dir = conf.get_state_dir()
+            if not os.path.isdir(state_dir):
+                fileutil.mkdir(state_dir, mode=0o700)
+
             vm_arch = self.osutil.get_vm_arch()
             logger.info("CPU Arch: {0}", vm_arch)
 

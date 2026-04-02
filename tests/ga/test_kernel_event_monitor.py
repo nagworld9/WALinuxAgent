@@ -48,14 +48,16 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
         "[12347.345678] eth0: link up\n"
     )
 
-    def _create_monitor(self, boot_id=None):
+    @staticmethod
+    def _get_soft_lockup_events(add_event_mock):
+        return [kwargs for _, kwargs in add_event_mock.call_args_list if kwargs.get("op") == WALAEventOperation.KernelSoftLockup]
+
+    @staticmethod
+    def _create_monitor(boot_id=None):
         if boot_id is None:
-            boot_id = self._TEST_BOOT_ID
-        with patch("azurelinuxagent.ga.kernel_event_monitor.conf") as mock_conf:
-            with patch.object(MonitorKernelSoftLockup, "_get_boot_id", return_value=boot_id):
-                mock_conf.get_monitor_kernel_soft_lockup_period.return_value = 300
-                mock_conf.get_lib_dir.return_value = self.tmp_dir
-                monitor = MonitorKernelSoftLockup()
+            boot_id = TestMonitorKernelSoftLockup._TEST_BOOT_ID
+        with patch.object(MonitorKernelSoftLockup, "_get_boot_id", return_value=boot_id):
+            monitor = MonitorKernelSoftLockup()
         return monitor
 
     # -- Regex ---------------------------------------------------------------
@@ -64,13 +66,13 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
         line = "[12345.123456] BUG: soft lockup - CPU#0 stuck for 22s! [kworker/0:1:1234]"
         match = MonitorKernelSoftLockup._SOFT_LOCKUP_PATTERN.search(line)
         self.assertIsNotNone(match)
-        self.assertEqual(match.group(1), "0")
-        self.assertEqual(match.group(2), "22")
+        self.assertEqual(match.group('cpu_id'), "0")
+        self.assertEqual(match.group('stuck_seconds'), "22")
 
     def test_timestamp_regex_should_match_kernel_monotonic_format(self):
         match = MonitorKernelSoftLockup._DMESG_TIMESTAMP_PATTERN.match("[    0.000000] Linux version")
         self.assertIsNotNone(match)
-        self.assertEqual(match.group(1), "0.000000")
+        self.assertEqual(match.group('timestamp'), "0.000000")
 
     # -- Parse and aggregate -------------------------------------------------
 
@@ -116,10 +118,11 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
         with patch("azurelinuxagent.ga.kernel_event_monitor.add_event") as mock_add_event:
             monitor._report_events()
 
-            self.assertEqual(mock_add_event.call_count, 1)
-            call_kwargs = mock_add_event.call_args[1]
+            events = self._get_soft_lockup_events(mock_add_event)
+            self.assertEqual(len(events), 1)
+            call_kwargs = events[0]
             self.assertEqual(call_kwargs["op"], WALAEventOperation.KernelSoftLockup)
-            self.assertFalse(call_kwargs["is_success"])
+            self.assertTrue(call_kwargs["is_success"])
             self.assertFalse(call_kwargs["log_event"])
 
             payload = json.loads(call_kwargs["message"])
@@ -205,8 +208,9 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
         with patch.object(monitor, "_get_dmesg_output", return_value=self.SAMPLE_DMESG_WITH_LOCKUPS):
             with patch("azurelinuxagent.ga.kernel_event_monitor.add_event") as mock_add_event:
                 monitor._operation()
-                self.assertEqual(mock_add_event.call_count, 1)
-                payload = json.loads(mock_add_event.call_args[1]["message"])
+                events = self._get_soft_lockup_events(mock_add_event)
+                self.assertEqual(len(events), 1)
+                payload = json.loads(events[0]["message"])
                 self.assertEqual(payload["totalSoftLockups"], 4)
                 self.assertEqual(payload["affectedCpuCount"], 3)
 
@@ -220,4 +224,4 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
         with patch.object(monitor, "_get_dmesg_output", return_value=self.SAMPLE_DMESG_WITH_LOCKUPS):
             with patch("azurelinuxagent.ga.kernel_event_monitor.add_event") as mock_add_event:
                 monitor._operation()
-                mock_add_event.assert_not_called()
+                self.assertEqual(len(self._get_soft_lockup_events(mock_add_event)), 0)

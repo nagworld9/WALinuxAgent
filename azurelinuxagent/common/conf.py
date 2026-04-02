@@ -299,6 +299,10 @@ def get_lib_dir(conf=__conf__):
     return conf.get("Lib.Dir", "/var/lib/waagent")
 
 
+def get_state_dir(conf=__conf__):
+    return os.path.join(get_lib_dir(conf), "state")
+
+
 def get_published_hostname(conf=__conf__):
     # Some applications rely on this file; do not remove this setting
     return os.path.join(get_lib_dir(conf), 'published_hostname')
@@ -534,14 +538,6 @@ def get_cgroups_enabled(conf=__conf__):
 
 def get_monitor_network_configuration_changes(conf=__conf__):
     return conf.get_switch("Monitor.NetworkConfigurationChanges", False)
-
-
-def get_monitor_kernel_soft_lockup(conf=__conf__):
-    return conf.get_switch("Monitor.KernelSoftLockup", True)
-
-
-def get_monitor_kernel_soft_lockup_period(conf=__conf__):
-    return conf.get_int("Monitor.KernelSoftLockupPeriod", 21600)
 
 
 def get_auto_update_to_latest_version(conf=__conf__):

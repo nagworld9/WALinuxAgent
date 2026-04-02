@@ -17,6 +17,7 @@
 
 import datetime
 import os
+import platform
 import threading
 
 import azurelinuxagent.common.conf as conf
@@ -308,11 +309,11 @@ class MonitorHandler(ThreadHandlerInterface):
                 logger.info("Monitor.NetworkConfigurationChanges is disabled.")
                 report_network_configuration_changes.log_network_configuration()
 
-            # Add kernel soft lockup monitoring if enabled
-            if conf.get_monitor_kernel_soft_lockup():
+            # Add kernel soft lockup monitoring (Linux only)
+            if 'Linux' in platform.system():
                 periodic_operations.append(MonitorKernelSoftLockup())
             else:
-                logger.info("Monitor.KernelSoftLockup is disabled.")
+                logger.info("KernelSoftLockup: Not supported on {0}, skipping.".format(platform.system()))
 
             while not self.stopped():
                 try:

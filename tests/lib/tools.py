@@ -196,6 +196,7 @@ class AgentTestCase(unittest.TestCase):
         self.test_file = 'test_file'
 
         conf.get_lib_dir = Mock(return_value=self.tmp_dir)
+        conf.get_state_dir = Mock(return_value=self.tmp_dir)
 
         ext_log_dir = os.path.join(self.tmp_dir, "azure")
         conf.get_ext_log_dir = Mock(return_value=ext_log_dir)

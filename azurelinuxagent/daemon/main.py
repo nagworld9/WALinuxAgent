@@ -117,6 +117,11 @@ class DaemonHandler(object):
             fileutil.mkdir(conf.get_lib_dir(), mode=0o700)
             os.chdir(conf.get_lib_dir())
 
+        # Create state dir for persisting component state files
+        state_dir = conf.get_state_dir()
+        if not os.path.isdir(state_dir):
+            fileutil.mkdir(state_dir, mode=0o700)
+
     def daemon(self, child_args=None):
         logger.info("Run daemon")
 
