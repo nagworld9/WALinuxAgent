@@ -450,7 +450,7 @@ class UpdateHandler(object):
                 snap_after = tracemalloc.take_snapshot()
 
                 stats = snap_after.compare_to(snap_before, "lineno")
-                for stat_diff in stats[:10]:
+                for stat_diff in stats:
                     print(stat_diff)
 
                 current, peak = tracemalloc.get_traced_memory()
