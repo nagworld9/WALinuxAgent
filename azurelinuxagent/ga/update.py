@@ -29,6 +29,7 @@ import sys
 import time
 import uuid
 from datetime import datetime, timedelta
+import tracemalloc
 
 from azurelinuxagent.common import conf
 from azurelinuxagent.common import logger
@@ -331,6 +332,7 @@ class UpdateHandler(object):
         """
 
         try:
+            tracemalloc.start()
             logger.info("{0} (Goal State Agent version {1})", AGENT_LONG_NAME, AGENT_VERSION)
             logger.info("OS: {0} {1}", DISTRO_NAME, DISTRO_VERSION)
             logger.info("Python: {0}.{1}.{2}", PY_VERSION_MAJOR, PY_VERSION_MINOR, PY_VERSION_MICRO)
@@ -437,12 +439,23 @@ class UpdateHandler(object):
             logger.info("Goal State Period: {0} sec. This indicates how often the agent checks for new goal states and reports status.", self._goal_state_period)
 
             while self.is_running:
+                snap_before = tracemalloc.take_snapshot()
                 self._check_daemon_running(debug)
                 self._check_threads_running(all_thread_handlers)
                 self._process_goal_state(exthandlers_handler, remote_access_handler, agent_update_handler)
                 self._send_heartbeat_telemetry(agent_update_handler)
                 self._check_agent_memory_usage()
                 time.sleep(self._goal_state_period)
+
+                snap_after = tracemalloc.take_snapshot()
+
+                stats = snap_after.compare_to(snap_before, "lineno")
+                for stat_diff in stats[:10]:
+                    print(stat_diff)
+
+                current, peak = tracemalloc.get_traced_memory()
+                print(f"Current={current / 1e6:.1f}MB Peak={peak / 1e6:.1f}MB")
+
 
         except AgentUpgradeExitException as exitException:
             add_event(op=WALAEventOperation.AgentUpgrade, message=exitException.reason, log_event=False)
