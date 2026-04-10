@@ -103,8 +103,8 @@ class MonitorKernelSoftLockup(PeriodicOperation):
         self._state_file_path = os.path.join(get_state_dir(), self._STATE_FILE_NAME)
         self._disabled = self._check_timestamps_disabled()
         self._last_processed_timestamp = self._get_saved_timestamp(self._boot_id, self._state_file_path)
-        logger.info("KernelSoftLockup: Initialized - period={0}, watermark={1}, boot_id={2}",
-                    period, self._last_processed_timestamp, self._boot_id)
+        logger.info("KernelSoftLockup: Initialized - period={0}, watermark={1}, boot_id={2}, disabled={3}".format(
+            period, self._last_processed_timestamp, self._boot_id, self._disabled))
 
     @staticmethod
     def _get_boot_id():
