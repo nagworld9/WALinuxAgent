@@ -189,21 +189,6 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
         monitor2 = self._create_monitor()
         self.assertEqual(monitor2._last_processed_timestamp, 0.0)
 
-    # -- Timestamp check (upfront disable) ------------------------------------
-
-    def test_check_timestamps_disabled_should_disable_when_no_timestamps(self):
-        no_timestamps = "\n".join(["line {0}".format(i) for i in range(60)])
-        monitor = self._create_monitor()
-        with patch.object(monitor, "_get_dmesg_output", return_value=no_timestamps):
-            self.assertTrue(monitor._check_timestamps_disabled())
-
-    def test_operation_should_skip_when_disabled(self):
-        monitor = self._create_monitor()
-        monitor._disabled = True
-        with patch.object(monitor, "_get_dmesg_output") as mock_dmesg:
-            monitor._operation()
-            mock_dmesg.assert_not_called()
-
     # -- dmesg output --------------------------------------------------------
 
     def test_get_dmesg_should_return_output_on_success(self):
