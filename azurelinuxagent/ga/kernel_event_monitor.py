@@ -33,7 +33,7 @@ import json
 import os
 import re
 
-from azurelinuxagent.ga.state_dir import get_state_dir
+from azurelinuxagent.ga import state_dir
 import azurelinuxagent.common.logger as logger
 from azurelinuxagent.common.event import add_event, WALAEventOperation
 from azurelinuxagent.common.future import ustr
@@ -100,7 +100,7 @@ class MonitorKernelSoftLockup(PeriodicOperation):
         super(MonitorKernelSoftLockup, self).__init__(period)
         self._boot_id = self._get_boot_id()
         self._event_aggregates = {}
-        self._state_file_path = os.path.join(get_state_dir(), self._STATE_FILE_NAME)
+        self._state_file_path = os.path.join(state_dir.get_state_dir(), self._STATE_FILE_NAME)
         self._disabled = self._check_timestamps_disabled()
         self._last_processed_timestamp = self._get_saved_timestamp(self._boot_id, self._state_file_path)
         logger.info("KernelSoftLockup: Initialized - period={0}, watermark={1}, boot_id={2}, disabled={3}".format(
