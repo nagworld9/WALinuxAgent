@@ -66,6 +66,7 @@ from azurelinuxagent.ga.guestagent import GuestAgent
 from azurelinuxagent.ga.monitor import get_monitor_handler
 from azurelinuxagent.ga.send_telemetry_events import get_send_telemetry_events_handler
 from azurelinuxagent.ga.signing_certificate_util import write_signing_certificates, get_microsoft_signing_certificate_path
+from azurelinuxagent.ga.state_dir import initialize_state_dir
 from azurelinuxagent.ga.confidential_vm_info import ConfidentialVMInfo
 
 CHILD_HEALTH_INTERVAL = 15 * 60
@@ -336,9 +337,7 @@ class UpdateHandler(object):
             logger.info("Python: {0}.{1}.{2}", PY_VERSION_MAJOR, PY_VERSION_MINOR, PY_VERSION_MICRO)
 
             # Ensure state dir exists (may not be created by the daemon if it runs an older version)
-            state_dir = conf.get_state_dir()
-            if not os.path.isdir(state_dir):
-                fileutil.mkdir(state_dir, mode=0o700)
+            initialize_state_dir()
 
             vm_arch = self.osutil.get_vm_arch()
             logger.info("CPU Arch: {0}", vm_arch)

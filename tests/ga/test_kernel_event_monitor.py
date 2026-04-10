@@ -26,7 +26,7 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
     """
     Tests for MonitorKernelSoftLockup.
 
-    AgentTestCase provides self.tmp_dir and mocks conf.get_lib_dir.
+    AgentTestCase provides self.tmp_dir and mocks get_state_dir.
     We additionally mock _get_boot_id so tests work on Windows.
     """
 
@@ -153,7 +153,7 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
 
     # -- State persistence ---------------------------------------------------
 
-    def test_save_and_load_state_should_preserve_watermark(self):
+    def test_save_and_get_saved_timestamp_should_preserve_watermark(self):
         monitor = self._create_monitor()
         self.assertEqual(monitor._last_processed_timestamp, 0.0)  # no state file yet
 
@@ -163,7 +163,7 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
         monitor2 = self._create_monitor()
         self.assertEqual(monitor2._last_processed_timestamp, 12345.678)
 
-    def test_load_state_should_reset_watermark_on_boot_id_change(self):
+    def test_get_saved_timestamp_should_reset_watermark_on_boot_id_change(self):
         monitor = self._create_monitor(boot_id="old-boot-id-0000-0000-000000000000")
         monitor._last_processed_timestamp = 99999.0
         monitor._save_state()
@@ -171,23 +171,38 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
         monitor2 = self._create_monitor(boot_id="new-boot-id-1111-1111-111111111111")
         self.assertEqual(monitor2._last_processed_timestamp, 0.0)
 
-    def test_load_state_should_reset_watermark_when_boot_id_is_falsy(self):
-        """Null or empty boot_id (saved or current) should reset watermark."""
+    def test_get_saved_timestamp_should_reset_watermark_when_boot_id_is_unknown(self):
+        """Empty boot_id in saved state should reset watermark."""
         monitor = self._create_monitor()
-        state = {"last_timestamp": 99999.0, "boot_id": None}
+        state = {"last_timestamp": 99999.0, "boot_id": ""}
         with open(monitor._state_file_path, 'w') as f:
             json.dump(state, f)
 
         monitor2 = self._create_monitor()
         self.assertEqual(monitor2._last_processed_timestamp, 0.0)
 
-    def test_load_state_should_handle_corrupt_state_file(self):
+    def test_get_saved_timestamp_should_handle_corrupt_state_file(self):
         monitor = self._create_monitor()
         with open(monitor._state_file_path, 'w') as f:
             f.write("{invalid json")
 
         monitor2 = self._create_monitor()
         self.assertEqual(monitor2._last_processed_timestamp, 0.0)
+
+    # -- Timestamp check (upfront disable) ------------------------------------
+
+    def test_check_timestamps_disabled_should_disable_when_no_timestamps(self):
+        no_timestamps = "\n".join(["line {0}".format(i) for i in range(60)])
+        monitor = self._create_monitor()
+        with patch.object(monitor, "_get_dmesg_output", return_value=no_timestamps):
+            self.assertTrue(monitor._check_timestamps_disabled())
+
+    def test_operation_should_skip_when_disabled(self):
+        monitor = self._create_monitor()
+        monitor._disabled = True
+        with patch.object(monitor, "_get_dmesg_output") as mock_dmesg:
+            monitor._operation()
+            mock_dmesg.assert_not_called()
 
     # -- dmesg output --------------------------------------------------------
 
@@ -199,7 +214,7 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
     def test_get_dmesg_should_return_empty_on_command_failure(self):
         monitor = self._create_monitor()
         with patch("azurelinuxagent.ga.kernel_event_monitor.run_command", side_effect=Exception("command failed")):
-            self.assertEqual(monitor._get_dmesg_output(), "")
+            self.assertEqual(monitor._get_dmesg_output(), MonitorKernelSoftLockup._EMPTY_DMESG_OUTPUT)
 
     # -- Full operation ------------------------------------------------------
 

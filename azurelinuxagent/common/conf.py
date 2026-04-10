@@ -299,10 +299,6 @@ def get_lib_dir(conf=__conf__):
     return conf.get("Lib.Dir", "/var/lib/waagent")
 
 
-def get_state_dir(conf=__conf__):
-    return os.path.join(get_lib_dir(conf), "state")
-
-
 def get_published_hostname(conf=__conf__):
     # Some applications rely on this file; do not remove this setting
     return os.path.join(get_lib_dir(conf), 'published_hostname')

@@ -33,7 +33,7 @@ import json
 import os
 import re
 
-import azurelinuxagent.common.conf as conf
+from azurelinuxagent.ga.state_dir import get_state_dir
 import azurelinuxagent.common.logger as logger
 from azurelinuxagent.common.event import add_event, WALAEventOperation
 from azurelinuxagent.common.future import ustr
@@ -83,22 +83,28 @@ class MonitorKernelSoftLockup(PeriodicOperation):
     # Returned when boot_id cannot be read; triggers a watermark reset
     _UNKNOWN_BOOT_ID = ""
 
+    # Default timestamp watermark
+    _DEFAULT_TIMESTAMP = 0.0
+
+    # Returned when dmesg output cannot be read
+    _EMPTY_DMESG_OUTPUT = ""
+
     # Timeout in seconds for dmesg subprocess.
     _DMESG_TIMEOUT = 60
     _PERIOD_SECONDS = 21600  # 6 hours
+    _MAX_DMESG_OUTPUT_CHARS = 20 * 1024 * 1024  # ~20 MB for ASCII dmesg output
     _MIN_LINES_FOR_TIMESTAMP_CHECK = 50  # Minimum dmesg lines to conclude timestamps are disabled
 
     def __init__(self):
         period = datetime.timedelta(seconds=self._PERIOD_SECONDS)
         super(MonitorKernelSoftLockup, self).__init__(period)
-        self._last_processed_timestamp = 0.0
         self._boot_id = self._get_boot_id()
         self._event_aggregates = {}
-        self._state_file_path = os.path.join(conf.get_state_dir(), self._STATE_FILE_NAME)
-        self._disabled = False
-        self._load_state()
+        self._state_file_path = os.path.join(get_state_dir(), self._STATE_FILE_NAME)
+        self._disabled = self._check_timestamps_disabled()
+        self._last_processed_timestamp = self._get_saved_timestamp(self._boot_id, self._state_file_path)
         logger.info("KernelSoftLockup: Initialized - period={0}, watermark={1}, boot_id={2}",
-                    period, self._last_processed_timestamp, self._boot_id[:8])
+                    period, self._last_processed_timestamp, self._boot_id)
 
     @staticmethod
     def _get_boot_id():
@@ -114,36 +120,62 @@ class MonitorKernelSoftLockup(PeriodicOperation):
             logger.warn("KernelSoftLockup: Failed to read boot_id: {0}".format(ustr(e)))
             return MonitorKernelSoftLockup._UNKNOWN_BOOT_ID
 
-    def _load_state(self):
+    def _check_timestamps_disabled(self):
         """
-        Load persisted state from disk. If boot_id changed (reboot occurred),
-        reset the watermark since kernel timestamps restart from 0.
+        Check upfront whether dmesg output contains kernel timestamps.
         """
         try:
-            if not os.path.exists(self._state_file_path):
-                return
+            dmesg_output = self._get_dmesg_output()
+            lines = dmesg_output.split('\n')
+            if len(lines) < self._MIN_LINES_FOR_TIMESTAMP_CHECK:
+                return False
 
-            with open(self._state_file_path, 'r') as f:
+            for line in lines:
+                if self._DMESG_TIMESTAMP_PATTERN.match(line):
+                    return False
+
+            logger.warn(
+                "KernelSoftLockup: No kernel timestamps found in dmesg output. "
+                "Disabling soft lockup monitoring.")
+            return True
+        except Exception as e:
+            logger.warn("KernelSoftLockup: Failed to check dmesg timestamps: {0}".format(ustr(e)))
+            return False
+
+    @staticmethod
+    def _get_saved_timestamp(boot_id, state_file_path):
+        """
+        Return the persisted timestamp watermark from the state file.
+        Returns _DEFAULT_TIMESTAMP (i.e. rescan from the beginning) if the state file is missing,
+        the boot ID changed (reboot), or the state cannot be read.
+        """
+        try:
+            if not os.path.exists(state_file_path):
+                return MonitorKernelSoftLockup._DEFAULT_TIMESTAMP
+
+            with open(state_file_path, 'r') as f:
                 state = json.load(f)
 
-            saved_boot_id = state.get("boot_id", self._UNKNOWN_BOOT_ID)
+            saved_boot_id = state.get("boot_id", MonitorKernelSoftLockup._UNKNOWN_BOOT_ID)
 
-            if saved_boot_id == self._UNKNOWN_BOOT_ID or self._boot_id == self._UNKNOWN_BOOT_ID:
+            # Reset if either boot ID is unknown
+            if saved_boot_id == MonitorKernelSoftLockup._UNKNOWN_BOOT_ID or boot_id == MonitorKernelSoftLockup._UNKNOWN_BOOT_ID:
                 logger.info("KernelSoftLockup: Unable to read Boot ID (saved={0}, current={1}). "
-                            "Resetting timestamp watermark as a safety measure.".format(
-                                ustr(saved_boot_id)[:8], ustr(self._boot_id)[:8]))
-                return
+                            "Resetting timestamp watermark.".format(
+                                ustr(saved_boot_id), ustr(boot_id)))
+                return MonitorKernelSoftLockup._DEFAULT_TIMESTAMP
 
-            if saved_boot_id != self._boot_id:
+            # Reset if boot IDs don't match — a reboot occurred
+            if saved_boot_id != boot_id:
                 logger.info("KernelSoftLockup: Boot ID changed (saved={0}, current={1}). "
                             "Resetting timestamp watermark due to reboot.".format(
-                                ustr(saved_boot_id)[:8], ustr(self._boot_id)[:8]))
-                return
+                                ustr(saved_boot_id), ustr(boot_id)))
+                return MonitorKernelSoftLockup._DEFAULT_TIMESTAMP
 
-            self._last_processed_timestamp = float(state.get("last_timestamp", 0.0))
+            return float(state.get("last_timestamp", MonitorKernelSoftLockup._DEFAULT_TIMESTAMP))
         except Exception as e:
             logger.warn("KernelSoftLockup: Failed to load state: {0}".format(ustr(e)))
-            self._last_processed_timestamp = 0.0
+            return MonitorKernelSoftLockup._DEFAULT_TIMESTAMP
 
     def _save_state(self):
         """Persist state to disk including boot_id to detect reboots."""
@@ -167,33 +199,32 @@ class MonitorKernelSoftLockup(PeriodicOperation):
             str: The dmesg output, or empty string on failure.
         """
         try:
-            # run_command() ignores the timeout on Python 2
-            # dmesg reads from an in-memory ring buffer, so a hang is not expected.
-            return run_command(['dmesg'], track_process=False, timeout=self._DMESG_TIMEOUT)
+            # dmesg reads from an in-memory ring buffer (bounded by CONFIG_LOG_BUF_SHIFT).
+            # Cap output as a safety measure so it doesn't stay in memory for long if a larger output comes.
+            output = run_command(['dmesg'], timeout=self._DMESG_TIMEOUT)
+            return output[-self._MAX_DMESG_OUTPUT_CHARS:]
         except Exception as e:
             logger.warn("KernelSoftLockup: Failed to read dmesg output: {0}".format(ustr(e)))
-            return ""
+            return self._EMPTY_DMESG_OUTPUT
 
     def _parse_and_aggregate_soft_lockup_events(self, dmesg_output):
         """
         Parse dmesg output for CPU soft lockup events and aggregate them by CPU
         directly into self._event_aggregates. Advances the watermark as it scans.
         """
-        found_timestamp = False
         dmesg_output_lines = dmesg_output.split('\n')
         for line in dmesg_output_lines:
             timestamp_match = self._DMESG_TIMESTAMP_PATTERN.match(line)
-            if not timestamp_match:
+            if timestamp_match is None:
                 continue
 
-            found_timestamp = True
             kernel_timestamp = float(timestamp_match.group('timestamp'))
             if kernel_timestamp <= self._last_processed_timestamp:
                 continue
 
             self._last_processed_timestamp = kernel_timestamp
             lockup_match = self._SOFT_LOCKUP_PATTERN.search(line)
-            if not lockup_match:
+            if lockup_match is None:
                 continue
 
             cpu_id = int(lockup_match.group('cpu_id'))
@@ -210,13 +241,6 @@ class MonitorKernelSoftLockup(PeriodicOperation):
             agg["count"] += 1
             agg["max_stuck_seconds"] = max(agg["max_stuck_seconds"], stuck_seconds)
             agg["last_timestamp"] = kernel_timestamp
-
-        if not found_timestamp and len(dmesg_output_lines) >= self._MIN_LINES_FOR_TIMESTAMP_CHECK:
-            logger.warn(
-                "KernelSoftLockup: No kernel timestamps found in dmesg output. "
-                "Kernel may have been built without CONFIG_PRINTK_TIME or timestamps are disabled (printk.time=0). "
-                "Disabling soft lockup monitoring.")
-            self._disabled = True
 
     def _report_events(self):
         """Report aggregated soft lockup events via telemetry."""
@@ -268,7 +292,7 @@ class MonitorKernelSoftLockup(PeriodicOperation):
 
         dmesg_output = self._get_dmesg_output()
         previous_timestamp = self._last_processed_timestamp
-        if dmesg_output:
+        if dmesg_output != self._EMPTY_DMESG_OUTPUT:
             self._parse_and_aggregate_soft_lockup_events(dmesg_output)
             self._report_events()
 
