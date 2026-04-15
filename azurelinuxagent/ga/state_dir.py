@@ -20,6 +20,8 @@
 import os
 
 import azurelinuxagent.common.conf as conf
+import azurelinuxagent.common.logger as logger
+from azurelinuxagent.common.future import ustr
 from azurelinuxagent.common.utils import fileutil
 
 
@@ -28,7 +30,10 @@ def get_state_dir():
 
 
 def initialize_state_dir():
-    """Create the state directory if it does not exist. Called from both the daemon and the extension handler."""
-    state_dir = get_state_dir()
-    if not os.path.isdir(state_dir):
-        fileutil.mkdir(state_dir, mode=0o700)
+    """Create the state directory if it does not exist."""
+    try:
+        state_dir = get_state_dir()
+        if not os.path.isdir(state_dir):
+            fileutil.mkdir(state_dir, mode=0o700)
+    except Exception as e:
+        logger.warn("Failed to create state directory: {0}".format(ustr(e)))

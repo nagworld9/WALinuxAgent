@@ -92,7 +92,16 @@ class MonitorKernelSoftLockup(PeriodicOperation):
     # Timeout in seconds for dmesg subprocess.
     _DMESG_TIMEOUT = 60
     _PERIOD_SECONDS = 21600  # 6 hours
-    _MAX_DMESG_OUTPUT_CHARS = 20 * 1024 * 1024  # ~20 MB for ASCII dmesg output
+    _MAX_DMESG_OUTPUT_BYTES = 20 * 1024 * 1024  # 20 MB cap for dmesg output
+
+    @staticmethod
+    def _is_dmesg_available():
+        """Check if dmesg is available on this system."""
+        try:
+            run_command(['which', 'dmesg'])
+            return True
+        except Exception:
+            return False
 
     def __init__(self):
         period = datetime.timedelta(seconds=self._PERIOD_SECONDS)
@@ -141,7 +150,8 @@ class MonitorKernelSoftLockup(PeriodicOperation):
                                 ustr(saved_boot_id), ustr(boot_id)))
                 return MonitorKernelSoftLockup._DEFAULT_TIMESTAMP
 
-            # Reset if boot IDs don't match, a reboot occurred
+            # Dmesg timestamps are monotonic (seconds since boot) and reset to 0 on reboot.
+            # A stale watermark from a previous boot would skip all new events, so reset it.
             if saved_boot_id != boot_id:
                 logger.info("KernelSoftLockup: Boot ID changed (saved={0}, current={1}). "
                             "Resetting timestamp watermark due to reboot.".format(
@@ -176,10 +186,13 @@ class MonitorKernelSoftLockup(PeriodicOperation):
         """
         try:
             # dmesg reads from an in-memory ring buffer (bounded by CONFIG_LOG_BUF_SHIFT).
-            # Cap output as a safety measure so it doesn't stay in memory for long if a larger output comes.
-            # run_command() ignores the timeout on Python 2
-            output = run_command(['dmesg'], timeout=self._DMESG_TIMEOUT)
-            return output[-self._MAX_DMESG_OUTPUT_CHARS:]
+            # Cap output via 'tail --bytes ...' as a safety measure to avoid excessive 
+            # memory usage in case of an unexpectedly large output.
+            # run_command() ignores the timeout on Python 2.
+            output = run_command(
+                ['/bin/sh', '-c', 'dmesg | tail --bytes {0}'.format(self._MAX_DMESG_OUTPUT_BYTES)],
+                timeout=self._DMESG_TIMEOUT)
+            return output
         except Exception as e:
             logger.warn("KernelSoftLockup: Failed to read dmesg output: {0}".format(ustr(e)))
             return self._EMPTY_DMESG_OUTPUT

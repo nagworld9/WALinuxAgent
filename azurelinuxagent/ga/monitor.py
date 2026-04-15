@@ -309,9 +309,12 @@ class MonitorHandler(ThreadHandlerInterface):
                 logger.info("Monitor.NetworkConfigurationChanges is disabled.")
                 report_network_configuration_changes.log_network_configuration()
 
-            # Add kernel soft lockup monitoring (Linux only)
+            # Add kernel soft lockup monitoring (Linux only, requires dmesg)
             if 'Linux' in platform.system():
-                periodic_operations.append(MonitorKernelSoftLockup())
+                if MonitorKernelSoftLockup._is_dmesg_available():
+                    periodic_operations.append(MonitorKernelSoftLockup())
+                else:
+                    logger.info("KernelSoftLockup: dmesg not found, skipping soft lockup monitoring.")
             else:
                 logger.info("KernelSoftLockup: Not supported on {0}, skipping.".format(platform.system()))
 
