@@ -20,6 +20,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 
 from azurelinuxagent.common import conf
 from azurelinuxagent.common import logger
@@ -32,13 +33,15 @@ from azurelinuxagent.ga.memorycontroller import _MemoryController
 from azurelinuxagent.common.exception import ExtensionErrorCodes, CGroupsException, AgentMemoryExceededException
 from azurelinuxagent.common.future import ustr
 from azurelinuxagent.common.osutil import systemd
-from azurelinuxagent.common.version import get_distro
+from azurelinuxagent.common.version import get_distro, CURRENT_VERSION
+from azurelinuxagent.common.utils.flexible_version import FlexibleVersion
 from azurelinuxagent.common.utils import shellutil, fileutil
 from azurelinuxagent.ga.extensionprocessutil import handle_process_completion
 from azurelinuxagent.common.event import add_event, WALAEventOperation
 from azurelinuxagent.ga.resourcequota import CpuQuota, MemoryQuota, ResourceName
 
 AZURE_SLICE = "azure.slice"
+_MEMORY_RESTART_TIMESTAMPS_FILE = "memory_restart_timestamps"
 _AZURE_SLICE_CONTENTS = """
 [Unit]
 Description=Slice for Azure VM Agent and Extensions
@@ -124,6 +127,7 @@ class CGroupConfigurator(object):
             self._agent_memory_metrics = None
             self._check_cgroups_lock = threading.RLock()  # Protect the check_cgroups which is called from Monitor thread and main loop.
             self._unexpected_processes = {}
+            self._anon_breach_count = 0  # Tracks consecutive checks where anon usage exceeds the limit
 
         def initialize(self):
             try:
@@ -183,8 +187,13 @@ class CGroupConfigurator(object):
                     if isinstance(controller, _CpuController) and self._cgroups_api.can_enforce_cpu():
                         self._set_resource_quota(agent_unit_name, {ResourceName.CPU:conf.get_agent_cpu_quota()})
                         controller.track_throttle_time(True)  # CPU controller track the throttle time only when CPU quota is set
-                    elif isinstance(controller, _MemoryController) and self._cgroups_api.can_enforce_memory():
-                        self._set_resource_quota(agent_unit_name, {ResourceName.MEMORY:conf.get_agent_memory_quota()})
+                    elif isinstance(controller, _MemoryController):
+                        # We no longer set a memory.high cgroup limit since it causes performance issues due to
+                        # cache pressure from the kernel's reclaim behavior. Instead, we self-monitor the agent's
+                        # anon memory usage and restart the agent if it exceeds the configured threshold sustained
+                        # over multiple consecutive checks (see check_agent_memory_usage).
+                        if self._cgroups_api.can_enforce_memory():
+                            self._reset_resource_quota(agent_unit_name, ResourceName.MEMORY)
                         self._agent_memory_metrics = controller
                     CGroupsTelemetry.track_cgroup_controller(controller)
 
@@ -776,17 +785,140 @@ class CGroupConfigurator(object):
                         raise CGroupsException("The agent has been throttled for {0} seconds".format(metric.value))
 
         def check_agent_memory_usage(self):
-            if self.enabled() and self._agent_memory_metrics is not None:
-                metrics = self._agent_memory_metrics.get_tracked_metrics()
-                current_usage = 0
-                for metric in metrics:
-                    if metric.counter == MetricsCounter.TOTAL_MEM_USAGE:
-                        current_usage += metric.value
-                    elif metric.counter == MetricsCounter.SWAP_MEM_USAGE:
-                        current_usage += metric.value
+            """
+            Checks the agent's anon memory usage and raises AgentMemoryExceededException if the usage exceeds the
+            configured threshold sustained over multiple consecutive checks.
 
-                if current_usage > conf.get_agent_memory_quota():
-                    raise AgentMemoryExceededException("The agent memory limit {0} bytes exceeded. The current reported usage is {1} bytes.".format(conf.get_agent_memory_quota(), current_usage))
+            This method implements self-monitoring without relying on cgroup memory.high limits. It:
+              1. Reads the agent's current anon memory usage from the cgroup memory controller.
+              2. If anon usage exceeds the threshold, increments the sustained breach counter.
+              3. If the breach counter reaches the configured sustained check count, checks restart policy:
+                 a. Max restarts (default 5) are tracked per agent version. When the agent is upgraded to a
+                    new version, the restart count resets.
+                 b. The last restart must be at least the configured cooldown apart (default 3 days).
+              4. If usage is below the threshold, resets the breach counter.
+
+            Restart timestamps are persisted to disk (along with the agent version) so the count survives
+            across agent process restarts. When the agent version changes, the persisted restart data is
+            cleared to allow the new version a fresh restart budget.
+
+            Raises:
+                AgentMemoryExceededException: If anon usage exceeds the limit for a sustained period
+                    and the restart policy allows it.
+            """
+            if not self.enabled() or self._agent_memory_metrics is None:
+                return
+
+            anon_usage, _ = self._agent_memory_metrics.get_memory_usage()
+            anon_limit = conf.get_agent_memory_quota()
+            sustained_count = conf.get_agent_memory_sustained_check_count()
+
+            if anon_usage > anon_limit:
+                self._anon_breach_count += 1
+                log_cgroup_info("Agent anon memory usage {0} bytes exceeds limit {1} bytes. "
+                                "Sustained breach count: {2}/{3}".format(anon_usage, anon_limit,
+                                                                         self._anon_breach_count, sustained_count))
+
+                if self._anon_breach_count >= sustained_count:
+                    now = time.time()
+                    max_restarts = conf.get_agent_memory_max_restarts()
+                    cooldown = conf.get_agent_memory_restart_cooldown()
+
+                    restart_data = self._load_memory_restart_timestamps()
+                    stored_version = restart_data.get("version")
+
+                    # Use FlexibleVersion for comparison to handle version format differences
+                    version_changed = True
+                    if stored_version is not None:
+                        try:
+                            version_changed = FlexibleVersion(stored_version) != CURRENT_VERSION
+                        except ValueError:
+                            version_changed = True
+
+                    # If the agent version changed, reset restart tracking for the new version
+                    if version_changed:
+                        log_cgroup_info("Agent version changed from '{0}' to '{1}'. "
+                                        "Resetting memory restart tracking.".format(
+                                            stored_version if stored_version is not None else "unknown",
+                                            ustr(CURRENT_VERSION)))
+                        restart_data = {"version": ustr(CURRENT_VERSION), "timestamps": []}
+
+                    restart_timestamps = restart_data.get("timestamps", [])
+
+                    # Check max restarts for this agent version
+                    if len(restart_timestamps) >= max_restarts:
+                        log_cgroup_warning("Agent version {0} has already been restarted {1} times due to memory "
+                                           "limit breaches (max {2}). Will not restart again.".format(
+                                            ustr(CURRENT_VERSION), len(restart_timestamps), max_restarts),
+                                           op=WALAEventOperation.AgentMemory)
+                        self._anon_breach_count = 0
+                        self._save_memory_restart_timestamps(restart_data)
+                        return
+
+                    # Check cooldown: last restart must be at least cooldown seconds ago
+                    if len(restart_timestamps) > 0:
+                        last_restart = restart_timestamps[-1]
+                        time_since_last = now - last_restart
+                        if time_since_last < cooldown:
+                            log_cgroup_warning("Agent was last restarted due to memory {0} seconds ago, which is "
+                                               "within the {1} second cooldown. Will not restart yet.".format(
+                                                int(time_since_last), cooldown),
+                                               op=WALAEventOperation.AgentMemory)
+                            self._anon_breach_count = 0
+                            return
+
+                    restart_timestamps.append(now)
+                    restart_data["timestamps"] = restart_timestamps
+                    self._save_memory_restart_timestamps(restart_data)
+                    self._anon_breach_count = 0
+
+                    raise AgentMemoryExceededException(
+                        "The agent anon memory limit {0} bytes exceeded. The current anon usage is {1} bytes "
+                        "(sustained over {2} consecutive checks). Restart count: {3}/{4}.".format(
+                            anon_limit, anon_usage, sustained_count, len(restart_timestamps), max_restarts))
+            else:
+                if self._anon_breach_count > 0:
+                    log_cgroup_info("Agent anon memory usage {0} bytes is within limit {1} bytes. "
+                                    "Resetting sustained breach count from {2} to 0.".format(
+                                        anon_usage, anon_limit, self._anon_breach_count))
+                self._anon_breach_count = 0
+
+        @staticmethod
+        def _get_memory_restart_timestamps_file():
+            return os.path.join(conf.get_lib_dir(), _MEMORY_RESTART_TIMESTAMPS_FILE)
+
+        @staticmethod
+        def _load_memory_restart_timestamps():
+            """
+            Loads memory restart data from disk. Returns a dict with 'version' and 'timestamps' keys.
+            If the file does not exist, cannot be read, or contains the old list format, returns
+            an empty dict with no version (which will trigger a reset on next save).
+            """
+            try:
+                timestamps_file = CGroupConfigurator._Impl._get_memory_restart_timestamps_file()
+                if os.path.exists(timestamps_file):
+                    data = json.loads(fileutil.read_file(timestamps_file))
+                    if isinstance(data, dict) and "version" in data and "timestamps" in data:
+                        data["timestamps"] = [float(t) for t in data["timestamps"]]
+                        return data
+                    # Old format (plain list) — treat as unknown version so it resets
+                    if isinstance(data, list):
+                        log_cgroup_info("Found old-format memory restart timestamps file. Will reset on next check.")
+                        return {"version": None, "timestamps": []}
+            except Exception as e:
+                log_cgroup_warning("Error loading memory restart timestamps: {0}".format(ustr(e)))
+            return {"version": None, "timestamps": []}
+
+        @staticmethod
+        def _save_memory_restart_timestamps(timestamps):
+            """
+            Saves memory restart timestamps to disk.
+            """
+            try:
+                timestamps_file = CGroupConfigurator._Impl._get_memory_restart_timestamps_file()
+                fileutil.write_file(timestamps_file, json.dumps(timestamps))
+            except Exception as e:
+                log_cgroup_warning("Error saving memory restart timestamps: {0}".format(ustr(e)))
 
         @staticmethod
         def _get_parent(pid):

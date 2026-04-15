@@ -1,6 +1,7 @@
 #
-# The test suite verify the agent running in expected cgroups and also, checks agent tracking the cgroups for polling resource metrics,
-# checks unexpected processes in the agent cgroups, and it verifies the agent cpu quota is set as expected.
+# The test suite verifies the agent is running in expected cgroups, checks agent tracking the cgroups for polling resource metrics,
+# checks unexpected processes in the agent cgroups, verifies the agent cpu quota is set as expected, and verifies the agent
+# does not set a cgroup memory limit (self-monitors anon memory usage instead).
 #
 name: "AgentCgroups"
 tests:

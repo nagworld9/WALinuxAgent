@@ -612,7 +612,8 @@ def get_agent_cpu_quota(conf=__conf__):
 
 def get_agent_memory_quota(conf=__conf__):
     """
-    Memory quota for the agent in Bytes defined as soft limit
+    Anon memory limit for the agent in bytes. If the agent's anon memory usage exceeds this limit sustained over
+    multiple consecutive checks, the agent will exit to allow the daemon to restart it.
 
     NOTE: This option is experimental and may be removed in later versions of the Agent.
     """
@@ -630,11 +631,47 @@ def get_agent_cpu_throttled_time_threshold(conf=__conf__):
 
 def get_enable_agent_memory_usage_check(conf=__conf__):
     """
-    If True, Agent checks it's Memory usage.
+    If True, Agent checks its anon memory usage and restarts if it exceeds the limit.
 
     NOTE: This option is experimental and may be removed in later versions of the Agent.
     """
     return conf.get_switch("Debug.EnableAgentMemoryUsageCheck", False)
+
+
+def get_agent_memory_sustained_check_count(conf=__conf__):
+    """
+    Number of consecutive memory checks that must exceed the anon memory limit before the agent exits.
+    Each check runs every CgroupCheckPeriod seconds (default 300s). A value of 3 means the anon usage
+    must be over the limit for ~15 minutes (3 * 300s) before the agent is restarted.
+
+    NOTE: This option is experimental and may be removed in later versions of the Agent.
+    """
+    return conf.get_int("Debug.AgentMemorySustainedCheckCount", 3)
+
+
+def get_agent_memory_max_restarts(conf=__conf__):
+    """
+    Maximum number of memory-triggered restarts allowed per agent version. If the agent has been restarted
+    this many times due to memory limit breaches for the current agent version, it will stop restarting to
+    avoid restart loops. When the agent is upgraded to a new version, the restart count resets.
+
+    NOTE: This option is experimental and may be removed in later versions of the Agent.
+    """
+    return conf.get_int("Debug.AgentMemoryMaxRestarts", 5)
+
+
+def get_agent_memory_restart_cooldown(conf=__conf__):
+    """
+    Minimum time in seconds that must elapse between two consecutive memory-triggered restarts.
+    If the last memory-triggered restart was less than this many seconds ago, the agent will
+    not restart again even if the memory limit is exceeded.
+
+    Default is 259200 seconds (3 days).
+
+    NOTE: This option is experimental and may be removed in later versions of the Agent.
+    """
+    return conf.get_int("Debug.AgentMemoryRestartCooldown", 259200)
+
 
 
 def get_enable_fast_track(conf=__conf__):

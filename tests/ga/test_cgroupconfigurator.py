@@ -37,7 +37,7 @@ from azurelinuxagent.common.utils import shellutil, fileutil
 from azurelinuxagent.ga.cpucontroller import CpuControllerV1
 from tests.lib.mock_environment import MockCommand
 from tests.lib.mock_cgroup_environment import mock_cgroup_v1_environment, UnitFilePaths, mock_cgroup_v2_environment
-from tests.lib.tools import AgentTestCase, patch, mock_sleep, data_dir, skip_if_predicate_true
+from tests.lib.tools import AgentTestCase, patch, mock_sleep, data_dir
 from tests.lib.miscellaneous_tools import format_processes, wait_for
 
 
@@ -1153,18 +1153,118 @@ exit 0
                         "Found unexpected processes in the agent cgroup before agent enable cgroups",
                         disable_events[0]["message"],
                         "The error message is not correct when process check failed")
-    @skip_if_predicate_true(lambda: True, "Enable/Rewrite this test when self monitoring is enabled")
-    def test_check_agent_memory_usage_should_raise_a_cgroups_exception_when_the_limit_is_exceeded(self):
-        metrics = [MetricValue(MetricsCategory.MEMORY_CATEGORY, MetricsCounter.TOTAL_MEM_USAGE, AGENT_NAME_TELEMETRY, conf.get_agent_memory_quota() + 1),
-                   MetricValue(MetricsCategory.MEMORY_CATEGORY, MetricsCounter.SWAP_MEM_USAGE, AGENT_NAME_TELEMETRY, conf.get_agent_memory_quota() + 1)]
+    def test_check_agent_memory_usage_should_raise_when_anon_limit_exceeded_sustained(self):
+        """
+        Verifies that check_agent_memory_usage raises AgentMemoryExceededException only after the anon usage
+        exceeds the limit for the configured number of sustained consecutive checks.
+        """
+        anon_usage_over_limit = conf.get_agent_memory_quota() + 1
+        anon_usage_under_limit = conf.get_agent_memory_quota() - 1
 
-        with self.assertRaises(AgentMemoryExceededException) as context_manager:
-            with self._get_cgroup_configurator() as configurator:
-                with patch("azurelinuxagent.ga.memorycontroller.MemoryControllerV1.get_tracked_metrics") as tracked_metrics:
-                    tracked_metrics.return_value = metrics
-                    configurator.check_agent_memory_usage()
+        with self._get_cgroup_configurator() as configurator:
+            with patch("azurelinuxagent.ga.memorycontroller.MemoryControllerV1.get_memory_usage") as mock_mem_usage:
+                with patch('azurelinuxagent.common.conf.get_agent_memory_sustained_check_count', return_value=3):
+                    with patch('azurelinuxagent.common.conf.get_lib_dir', return_value=self.tmp_dir):
+                        # First two checks exceed limit but should not raise (sustained count not reached)
+                        mock_mem_usage.return_value = (anon_usage_over_limit, 0)
+                        configurator.check_agent_memory_usage()  # breach 1
+                        configurator.check_agent_memory_usage()  # breach 2
 
-        self.assertIn("The agent memory limit {0} bytes exceeded".format(conf.get_agent_memory_quota()), ustr(context_manager.exception), "An incorrect exception was raised")
+                        # Usage drops below limit - should reset breach counter
+                        mock_mem_usage.return_value = (anon_usage_under_limit, 0)
+                        configurator.check_agent_memory_usage()
+
+                        # Start over - 3 consecutive breaches should raise
+                        mock_mem_usage.return_value = (anon_usage_over_limit, 0)
+                        configurator.check_agent_memory_usage()  # breach 1
+                        configurator.check_agent_memory_usage()  # breach 2
+
+                        with self.assertRaises(AgentMemoryExceededException) as context_manager:
+                            configurator.check_agent_memory_usage()  # breach 3 - should raise
+
+                        self.assertIn("The agent anon memory limit {0} bytes exceeded".format(conf.get_agent_memory_quota()),
+                                      ustr(context_manager.exception), "An incorrect exception was raised")
+
+    def test_check_agent_memory_usage_should_stop_restarting_after_max_restarts_per_version(self):
+        """
+        Verifies that check_agent_memory_usage stops raising exceptions after the maximum
+        restart count is reached for the current agent version.
+        """
+        anon_usage_over_limit = conf.get_agent_memory_quota() + 1
+
+        with self._get_cgroup_configurator() as configurator:
+            with patch("azurelinuxagent.ga.memorycontroller.MemoryControllerV1.get_memory_usage",
+                       return_value=(anon_usage_over_limit, 0)):
+                with patch('azurelinuxagent.common.conf.get_agent_memory_sustained_check_count', return_value=1):
+                    with patch('azurelinuxagent.common.conf.get_agent_memory_max_restarts', return_value=2):
+                        with patch('azurelinuxagent.common.conf.get_agent_memory_restart_cooldown', return_value=0):
+                            with patch('azurelinuxagent.common.conf.get_lib_dir', return_value=self.tmp_dir):
+                                # First restart
+                                with self.assertRaises(AgentMemoryExceededException):
+                                    configurator.check_agent_memory_usage()
+
+                                # Second restart
+                                with self.assertRaises(AgentMemoryExceededException):
+                                    configurator.check_agent_memory_usage()
+
+                                # Third attempt - should NOT raise since max restarts (2) reached for this version
+                                configurator.check_agent_memory_usage()
+
+    def test_check_agent_memory_usage_should_not_restart_within_cooldown_period(self):
+        """
+        Verifies that check_agent_memory_usage does not restart the agent if the last restart
+        was within the cooldown period (default 3 days).
+        """
+        anon_usage_over_limit = conf.get_agent_memory_quota() + 1
+
+        with self._get_cgroup_configurator() as configurator:
+            with patch("azurelinuxagent.ga.memorycontroller.MemoryControllerV1.get_memory_usage",
+                       return_value=(anon_usage_over_limit, 0)):
+                with patch('azurelinuxagent.common.conf.get_agent_memory_sustained_check_count', return_value=1):
+                    with patch('azurelinuxagent.common.conf.get_agent_memory_max_restarts', return_value=5):
+                        with patch('azurelinuxagent.common.conf.get_agent_memory_restart_cooldown', return_value=259200):
+                            with patch('azurelinuxagent.common.conf.get_lib_dir', return_value=self.tmp_dir):
+                                # First restart should succeed
+                                with self.assertRaises(AgentMemoryExceededException):
+                                    configurator.check_agent_memory_usage()
+
+                                # Second attempt immediately after - should NOT raise (within 3-day cooldown)
+                                configurator.check_agent_memory_usage()
+
+    def test_check_agent_memory_usage_should_reset_restarts_when_agent_version_changes(self):
+        """
+        Verifies that when the agent version changes, the restart count resets,
+        allowing new restarts even if the max restart count was previously reached.
+        """
+        anon_usage_over_limit = conf.get_agent_memory_quota() + 1
+
+        with self._get_cgroup_configurator() as configurator:
+            with patch("azurelinuxagent.ga.memorycontroller.MemoryControllerV1.get_memory_usage",
+                       return_value=(anon_usage_over_limit, 0)):
+                with patch('azurelinuxagent.common.conf.get_agent_memory_sustained_check_count', return_value=1):
+                    with patch('azurelinuxagent.common.conf.get_agent_memory_max_restarts', return_value=2):
+                        with patch('azurelinuxagent.common.conf.get_agent_memory_restart_cooldown', return_value=0):
+                            with patch('azurelinuxagent.common.conf.get_lib_dir', return_value=self.tmp_dir):
+                                # Pre-seed 2 restarts for a different (old) agent version
+                                import json
+                                old_data = {"version": "2.3.0.0", "timestamps": [time.time() - 200, time.time() - 150]}
+                                timestamps_file = os.path.join(self.tmp_dir, "memory_restart_timestamps")
+                                with open(timestamps_file, "w") as f:
+                                    f.write(json.dumps(old_data))
+
+                                # Even though 2 restarts exist (max is 2), they belong to an older version.
+                                # The current version should get a fresh restart budget.
+                                with self.assertRaises(AgentMemoryExceededException):
+                                    configurator.check_agent_memory_usage()
+
+    def test_check_agent_memory_usage_should_not_check_when_not_enabled(self):
+        """
+        Verifies that check_agent_memory_usage does nothing when cgroups are not enabled.
+        """
+        with self._get_cgroup_configurator(enable=False) as configurator:
+            with patch("azurelinuxagent.ga.memorycontroller.MemoryControllerV1.get_memory_usage") as mock_mem_usage:
+                configurator.check_agent_memory_usage()
+                mock_mem_usage.assert_not_called()
 
     def test_get_log_collector_properties_should_return_correct_props(self):
         with self._get_cgroup_configurator() as configurator:

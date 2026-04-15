@@ -1133,11 +1133,19 @@ class UpdateHandler(object):
 
     def _check_agent_memory_usage(self):
         """
-        This checks the agent current memory usage and safely exit the process if agent reaches the memory limit
+        Checks the agent's anon memory usage after processing goal state and safely exits the process if the agent
+        exceeds its memory limit. The sustained breach detection (requiring multiple consecutive checks over the limit)
+        and restart throttling (limiting restarts within a time window) are handled by CGroupConfigurator.
+
+        The check is gated on:
+          - Debug.EnableAgentMemoryUsageCheck config option
+          - Extensions having converged (to avoid false positives during active extension processing)
+          - A delay after initial startup (CHILD_LAUNCH_INTERVAL) to avoid restarting during initialization spikes
+          - A periodic interval (CgroupCheckPeriod) between subsequent checks
         """
         try:
             if conf.get_enable_agent_memory_usage_check() and self._extensions_summary.converged:
-                # we delay first attempt memory usage check, so that current agent won't get blacklisted due to multiple restarts(because of memory limit reach) too frequently
+                # Delay the first check to avoid restarting during initialization memory spikes
                 if (self._initial_attempt_check_memory_usage and time.time() - self._last_check_memory_usage_time > CHILD_LAUNCH_INTERVAL) or \
                         (not self._initial_attempt_check_memory_usage and time.time() - self._last_check_memory_usage_time > conf.get_cgroup_check_period()):
                     self._last_check_memory_usage_time = time.time()
