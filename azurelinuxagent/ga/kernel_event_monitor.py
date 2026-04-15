@@ -90,7 +90,7 @@ class MonitorKernelSoftLockup(PeriodicOperation):
     _EMPTY_DMESG_OUTPUT = ""
 
     # Timeout in seconds for dmesg subprocess.
-    _DMESG_TIMEOUT = 60
+    _DMESG_TIMEOUT_SECONDS = 60
     _PERIOD_SECONDS = 21600  # 6 hours
     _MAX_DMESG_OUTPUT_BYTES = 20 * 1024 * 1024  # 20 MB cap for dmesg output
 
@@ -191,7 +191,7 @@ class MonitorKernelSoftLockup(PeriodicOperation):
             # run_command() ignores the timeout on Python 2.
             output = run_command(
                 ['/bin/sh', '-c', 'dmesg | tail --bytes {0}'.format(self._MAX_DMESG_OUTPUT_BYTES)],
-                timeout=self._DMESG_TIMEOUT)
+                timeout=self._DMESG_TIMEOUT_SECONDS)
             return output
         except Exception as e:
             logger.warn("KernelSoftLockup: Failed to read dmesg output: {0}".format(ustr(e)))
