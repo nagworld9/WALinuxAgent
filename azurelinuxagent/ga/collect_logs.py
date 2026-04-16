@@ -112,6 +112,7 @@ class CollectLogsHandler(ThreadHandlerInterface):
         self.last_state = None
         self.period = conf.get_collect_logs_period()
         self.log_collector_cgroup_path_validation_errors = 0
+        self._stop_event = threading.Event()
 
     def run(self):
         self.start()
@@ -120,7 +121,7 @@ class CollectLogsHandler(ThreadHandlerInterface):
         return self.should_run
 
     def is_alive(self):
-        return self.event_thread.is_alive()
+        return self.event_thread is not None and self.event_thread.is_alive()
 
     def start(self):
         self.event_thread = threading.Thread(target=self.daemon)
@@ -129,13 +130,14 @@ class CollectLogsHandler(ThreadHandlerInterface):
         self.event_thread.start()
 
     def join(self):
-        self.event_thread.join()
+        self.event_thread.join(timeout=self._THREAD_JOIN_TIMEOUT)
 
     def stopped(self):
         return not self.should_run
 
     def stop(self):
         self.should_run = False
+        self._stop_event.set()
         if self.is_alive():
             try:
                 self.join()
@@ -152,7 +154,7 @@ class CollectLogsHandler(ThreadHandlerInterface):
     def daemon(self):
         # Delay the first collector on start up to give short lived VMs (that might be dead before the second 
         # collection has a chance to run) an opportunity to do produce meaningful logs to collect.
-        time.sleep(conf.get_log_collector_initial_delay())
+        self._stop_event.wait(conf.get_log_collector_initial_delay())
 
         try:
             CollectLogsHandler.enable_monitor_cgroups_check()
@@ -166,7 +168,7 @@ class CollectLogsHandler(ThreadHandlerInterface):
                     logger.error("An error occurred in the log collection thread main loop; "
                                  "will skip the current iteration.\n{0}", ustr(e))
                 finally:
-                    time.sleep(self.period)
+                    self._stop_event.wait(self.period)
         except Exception as e:
             logger.error("An error occurred in the log collection thread; will exit the thread.\n{0}", ustr(e))
         finally:

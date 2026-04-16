@@ -581,6 +581,7 @@ class CollectTelemetryEventsHandler(ThreadHandlerInterface):
         self.should_run = True
         self.thread = None
         self._send_telemetry_events_handler = send_telemetry_events_handler
+        self._stop_event = threading.Event()
 
     @staticmethod
     def get_thread_name():
@@ -604,8 +605,9 @@ class CollectTelemetryEventsHandler(ThreadHandlerInterface):
         Stop server communication and join the thread to main thread.
         """
         self.should_run = False
+        self._stop_event.set()
         if self.is_alive():
-            self.thread.join()
+            self.thread.join(timeout=self._THREAD_JOIN_TIMEOUT)
 
     def stopped(self):
         return not self.should_run
@@ -631,7 +633,7 @@ class CollectTelemetryEventsHandler(ThreadHandlerInterface):
                     "An error occurred in the Telemetry Extension thread main loop; will skip the current iteration.\n{0}",
                     ustr(error))
             finally:
-                PeriodicOperation.sleep_until_next_operation(periodic_operations)
+                PeriodicOperation.sleep_until_next_operation(periodic_operations, self._stop_event)
 
     @staticmethod
     def add_common_params_to_telemetry_event(event, event_time):

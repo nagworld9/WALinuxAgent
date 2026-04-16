@@ -260,17 +260,19 @@ class MonitorHandler(ThreadHandlerInterface):
     def __init__(self):
         self.monitor_thread = None
         self.should_run = True
+        self._stop_event = threading.Event()
 
     def run(self):
         self.start()
 
     def stop(self):
         self.should_run = False
+        self._stop_event.set()
         if self.is_alive():
             self.join()
 
     def join(self):
-        self.monitor_thread.join()
+        self.monitor_thread.join(timeout=self._THREAD_JOIN_TIMEOUT)
 
     def stopped(self):
         return not self.should_run
@@ -312,7 +314,7 @@ class MonitorHandler(ThreadHandlerInterface):
                     for op in periodic_operations:
                         op.run()
                 finally:
-                    PeriodicOperation.sleep_until_next_operation(periodic_operations)
+                    PeriodicOperation.sleep_until_next_operation(periodic_operations, self._stop_event)
         except Exception as e:
             logger.error("An error occurred in the monitor thread; will exit the thread.\n{0}", ustr(e))
 

@@ -84,7 +84,7 @@ class SendTelemetryEventsHandler(ThreadHandlerInterface):
 
     def join(self):
         self._queue.join()
-        self._thread.join()
+        self._thread.join(timeout=self._THREAD_JOIN_TIMEOUT)
 
     def stopped(self):
         return not self.should_run

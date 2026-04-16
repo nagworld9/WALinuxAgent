@@ -899,6 +899,71 @@ class TestUpdate(UpdateTestCase):
         self.assertFalse(self.update_handler.is_running)
         self.assertFalse(os.path.isfile(self.update_handler._sentinel_file_path()))
 
+    def test_shutdown_stops_all_threads(self):
+        # Create mock thread handlers and track the order in which stop() is called
+        call_order = []
+        mock_handlers = []
+        for name in ["MonitorHandler", "EnvHandler", "SendTelemetryHandler", "TelemetryEventsCollector"]:
+            handler = MagicMock()
+            handler.get_thread_name.return_value = name
+            handler.is_alive.return_value = False
+            handler.stop.side_effect = lambda n=name: call_order.append(n)
+            mock_handlers.append(handler)
+
+        self.update_handler._all_thread_handlers = mock_handlers
+        self.update_handler._shutdown()
+
+        # Verify stop() was called on each handler
+        for handler in mock_handlers:
+            self.assertEqual(1, handler.stop.call_count)
+
+        # Verify handlers were stopped in reverse order
+        expected_order = ["TelemetryEventsCollector", "SendTelemetryHandler", "EnvHandler", "MonitorHandler"]
+        self.assertEqual(expected_order, call_order, "Handlers should be stopped in reverse order")
+
+        self.assertFalse(self.update_handler.is_running)
+
+    def test_shutdown_logs_warning_if_thread_does_not_stop(self):
+        # Create a mock handler that reports it's still alive after stop()
+        handler = MagicMock()
+        handler.get_thread_name.return_value = "StuckThread"
+        handler.is_alive.return_value = True  # Thread didn't stop within timeout
+
+        self.update_handler._all_thread_handlers = [handler]
+
+        with patch('azurelinuxagent.ga.update.logger') as mock_logger:
+            self.update_handler._shutdown()
+            self.assertEqual(1, handler.stop.call_count)
+            # Verify that a warning was logged about the thread not stopping
+            mock_logger.warn.assert_any_call("{0} thread did not stop within the timeout", "StuckThread")
+
+    def test_shutdown_continues_if_thread_stop_raises_exception(self):
+        # _shutdown() iterates in reverse order, so the last handler in the list is stopped first.
+        # Place the failing handler last to verify that an exception during its stop() does not
+        # prevent the remaining handlers from being stopped.
+        call_order = []
+
+        good_handler = MagicMock()
+        good_handler.get_thread_name.return_value = "GoodThread"
+        good_handler.is_alive.return_value = False
+        good_handler.stop.side_effect = lambda: call_order.append("GoodThread")
+
+        failing_handler = MagicMock()
+        failing_handler.get_thread_name.return_value = "FailingThread"
+        def _raise_on_stop():
+            call_order.append("FailingThread")
+            raise Exception("test error")
+        failing_handler.stop.side_effect = _raise_on_stop
+
+        # failing_handler is last, so it is stopped first in reverse order
+        self.update_handler._all_thread_handlers = [good_handler, failing_handler]
+        self.update_handler._shutdown()
+
+        # Verify both were stopped in reverse order despite the exception
+        self.assertEqual(["FailingThread", "GoodThread"], call_order,
+            "FailingThread should be stopped first (reverse order), and the exception should not prevent GoodThread from being stopped")
+        self.assertFalse(self.update_handler.is_running)
+
     def test_shutdown_ignores_missing_sentinel_file(self):
         self.assertFalse(os.path.isfile(self.update_handler._sentinel_file_path()))
         self.update_handler._shutdown()
@@ -1922,7 +1987,8 @@ class MonitorThreadTest(AgentTestCase):
                                         with patch('azurelinuxagent.ga.update.is_log_collection_allowed', return_value=True):
                                             with patch('time.sleep'):
                                                 with patch('sys.exit'):
-                                                    self.update_handler.run()
+                                                    with patch.object(UpdateHandler, '_shutdown'):
+                                                        self.update_handler.run()
 
     def _setup_mock_thread_and_start_test_run(self, mock_thread, is_alive=True, invocations=0):
         thread = MagicMock()

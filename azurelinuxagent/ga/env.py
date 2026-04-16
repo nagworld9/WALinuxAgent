@@ -254,6 +254,7 @@ class EnvHandler(ThreadHandlerInterface):
         self.stopped = True
         self.hostname = None
         self.env_thread = None
+        self._stop_event = threading.Event()
 
     def run(self):
         if not self.stopped:
@@ -265,7 +266,7 @@ class EnvHandler(ThreadHandlerInterface):
         self.start()
 
     def is_alive(self):
-        return self.env_thread.is_alive()
+        return self.env_thread is not None and self.env_thread.is_alive()
 
     def start(self):
         self.env_thread = threading.Thread(target=self.daemon)
@@ -300,7 +301,7 @@ class EnvHandler(ThreadHandlerInterface):
                 except Exception as e:
                     logger.error("An error occurred in the environment thread main loop; will skip the current iteration.\n{0}", ustr(e))
                 finally:
-                    PeriodicOperation.sleep_until_next_operation(periodic_operations)
+                    PeriodicOperation.sleep_until_next_operation(periodic_operations, self._stop_event)
         except Exception as e:
             logger.error("An error occurred in the environment thread; will exit the thread.\n{0}", ustr(e))
 
@@ -309,5 +310,6 @@ class EnvHandler(ThreadHandlerInterface):
         Stop server communication and join the thread to main thread.
         """
         self.stopped = True
+        self._stop_event.set()
         if self.env_thread is not None:
-            self.env_thread.join()
+            self.env_thread.join(timeout=self._THREAD_JOIN_TIMEOUT)

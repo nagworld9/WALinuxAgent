@@ -65,10 +65,13 @@ class PeriodicOperation(object):
         raise NotImplementedError()
 
     @staticmethod
-    def sleep_until_next_operation(operations):
+    def sleep_until_next_operation(operations, stop_event=None):
         """
         Takes a list of operations, finds the operation that should be executed next (that with the closest next_run_time)
         and sleeps until it is time to execute that operation.
+
+        If a stop_event (threading.Event) is provided, the sleep will be interrupted when the event is set, allowing
+        the caller to wake up promptly during shutdown.
         """
         next_operation_time = min(op.next_run_time() for op in operations)
 
@@ -77,5 +80,8 @@ class PeriodicOperation(object):
         sleep_seconds = ((sleep_timedelta.days * 24 * 3600 + sleep_timedelta.seconds) * 10.0 ** 6 + sleep_timedelta.microseconds) / 10.0 ** 6
 
         if sleep_seconds > 0:
-            time.sleep(sleep_seconds)
+            if stop_event is not None:
+                stop_event.wait(sleep_seconds)
+            else:
+                time.sleep(sleep_seconds)
 
