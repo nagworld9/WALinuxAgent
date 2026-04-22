@@ -124,6 +124,7 @@ class CollectLogsHandler(ThreadHandlerInterface):
         return self.event_thread is not None and self.event_thread.is_alive()
 
     def start(self):
+        self._stop_event.clear()
         self.event_thread = threading.Thread(target=self.daemon)
         self.event_thread.daemon = True
         self.event_thread.name = self.get_thread_name()

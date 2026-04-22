@@ -595,6 +595,7 @@ class CollectTelemetryEventsHandler(ThreadHandlerInterface):
         return self.thread is not None and self.thread.is_alive()
 
     def start(self):
+        self._stop_event.clear()
         self.thread = threading.Thread(target=self.daemon)
         self.thread.daemon = True
         self.thread.name = CollectTelemetryEventsHandler.get_thread_name()

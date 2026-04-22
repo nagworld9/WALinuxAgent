@@ -83,7 +83,10 @@ class SendTelemetryEventsHandler(ThreadHandlerInterface):
             self.join()
 
     def join(self):
-        self._queue.join()
+        # Note: We intentionally do not call self._queue.join() here because it blocks indefinitely with no timeout
+        # support, which could hang shutdown if the thread is stuck on a network call. The thread's main loop already
+        # drains the queue before exiting (while not self.stopped() or not self._queue.empty()), so a timed thread
+        # join is sufficient.
         self._thread.join(timeout=self._THREAD_JOIN_TIMEOUT)
 
     def stopped(self):

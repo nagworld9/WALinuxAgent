@@ -269,6 +269,7 @@ class EnvHandler(ThreadHandlerInterface):
         return self.env_thread is not None and self.env_thread.is_alive()
 
     def start(self):
+        self._stop_event.clear()
         self.env_thread = threading.Thread(target=self.daemon)
         self.env_thread.daemon = True
         self.env_thread.name = self.get_thread_name()

@@ -281,6 +281,7 @@ class MonitorHandler(ThreadHandlerInterface):
         return self.monitor_thread is not None and self.monitor_thread.is_alive()
 
     def start(self):
+        self._stop_event.clear()
         self.monitor_thread = threading.Thread(target=self.daemon)
         self.monitor_thread.daemon = True
         self.monitor_thread.name = self.get_thread_name()
