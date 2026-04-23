@@ -185,7 +185,7 @@ class MonitorKernelSoftLockup(PeriodicOperation):
             process = shellutil._popen(['dmesg'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False)
             for line in process.stdout:
                 if isinstance(line, bytes):
-                    line = line.decode('utf-8', errors='replace')
+                    line = line.decode('utf-8', 'replace')
                 line = line.rstrip('\n')
                 self._parse_and_aggregate_soft_lockup_events(line)
 
