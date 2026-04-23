@@ -179,14 +179,16 @@ class MonitorKernelSoftLockup(PeriodicOperation):
         """
         process = None
         try:
-            process = shellutil._popen(['dmesg'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False)
+            process = shellutil._popen(['dmesg'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False)
             for line in process.stdout:
                 if isinstance(line, bytes):
                     line = line.decode('utf-8', errors='replace')
                 line = line.rstrip('\n')
                 self._parse_and_aggregate_soft_lockup_events(line)
 
-            process.wait()
+            returncode = process.wait()
+            if returncode != 0:
+                logger.warn("KernelSoftLockup: dmesg exited with return code {0}".format(returncode))
         except Exception as e:
             logger.warn("KernelSoftLockup: Failed to read dmesg output: {0}".format(ustr(e)))
         finally:
