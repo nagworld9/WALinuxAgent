@@ -18,6 +18,7 @@
 import json
 
 from azurelinuxagent.common.event import WALAEventOperation
+from azurelinuxagent.common.utils import shellutil
 from azurelinuxagent.ga.kernel_event_monitor import MonitorKernelSoftLockup
 from tests.lib.tools import AgentTestCase, patch, MagicMock
 
@@ -204,15 +205,14 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
         mock_process.stdout = [dmesg_line.encode('utf-8')]
         mock_process.wait.return_value = 0
         mock_process.pid = 12345
-        with patch("azurelinuxagent.ga.kernel_event_monitor.shellutil") as mock_shellutil:
-            mock_shellutil._popen.return_value = mock_process
+        with patch.object(shellutil, '_popen', return_value=mock_process), \
+                patch.object(shellutil, '_on_command_completed'):
             monitor._read_and_parse_dmesg()
             self.assertEqual(monitor._event_aggregates[0]["count"], 1)
 
     def test_read_and_parse_dmesg_should_not_crash_on_failure(self):
         monitor = self._create_monitor()
-        with patch("azurelinuxagent.ga.kernel_event_monitor.shellutil") as mock_shellutil:
-            mock_shellutil._popen.side_effect = Exception("command failed")
+        with patch.object(shellutil, '_popen', side_effect=Exception("command failed")):
             monitor._read_and_parse_dmesg()
         self.assertEqual(len(monitor._event_aggregates), 0)
 
