@@ -60,6 +60,12 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
             monitor = MonitorKernelSoftLockup()
         return monitor
 
+    @staticmethod
+    def _feed_dmesg(monitor, dmesg_output):
+        """Feed dmesg lines into the parser (no mocking needed)."""
+        for line in dmesg_output.strip().split('\n'):
+            monitor._parse_and_aggregate_soft_lockup_events(line)
+
     # -- Regex ---------------------------------------------------------------
 
     def test_soft_lockup_regex_should_match_and_extract_groups(self):
@@ -78,7 +84,7 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
 
     def test_parse_should_detect_and_aggregate_lockup_events(self):
         monitor = self._create_monitor()
-        monitor._parse_and_aggregate_soft_lockup_events(self.SAMPLE_DMESG_WITH_LOCKUPS)
+        self._feed_dmesg(monitor, self.SAMPLE_DMESG_WITH_LOCKUPS)
 
         # 4 lockup events across 3 CPUs: CPU#0 (x2), CPU#2 (x1), CPU#1 (x1)
         self.assertEqual(len(monitor._event_aggregates), 3)
@@ -94,14 +100,14 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
     def test_parse_should_skip_events_before_watermark(self):
         monitor = self._create_monitor()
         monitor._last_processed_timestamp = 12346.0
-        monitor._parse_and_aggregate_soft_lockup_events(self.SAMPLE_DMESG_WITH_LOCKUPS)
+        self._feed_dmesg(monitor, self.SAMPLE_DMESG_WITH_LOCKUPS)
 
         self.assertEqual(monitor._event_aggregates[0]["count"], 1)
         self.assertEqual(monitor._event_aggregates[0]["max_stuck_seconds"], 23)
 
     def test_parse_should_advance_watermark_even_without_lockups(self):
         monitor = self._create_monitor()
-        monitor._parse_and_aggregate_soft_lockup_events(self.SAMPLE_DMESG_NO_LOCKUPS)
+        self._feed_dmesg(monitor, self.SAMPLE_DMESG_NO_LOCKUPS)
 
         self.assertEqual(len(monitor._event_aggregates), 0)
         self.assertAlmostEqual(monitor._last_processed_timestamp, 12347.345678, places=4)
@@ -189,23 +195,30 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
         monitor2 = self._create_monitor()
         self.assertEqual(monitor2._last_processed_timestamp, 0.0)
 
-    # -- dmesg output --------------------------------------------------------
+    # -- dmesg read ------------------------------------------------------------
 
-    def test_get_dmesg_should_return_output_on_success(self):
+    def test_read_and_parse_dmesg_should_parse_on_success(self):
         monitor = self._create_monitor()
-        with patch("azurelinuxagent.ga.kernel_event_monitor.run_command", return_value="[0.000000] test line\n"):
-            self.assertIn("test line", monitor._get_dmesg_output())
+        dmesg_line = "[12345.123456] BUG: soft lockup - CPU#0 stuck for 22s! [kworker/0:1:1234]"
+        with patch("azurelinuxagent.ga.kernel_event_monitor.shellutil") as mock_shellutil:
+            mock_shellutil._popen.return_value.stdout = [dmesg_line.encode('utf-8')]
+            mock_shellutil._popen.return_value.pid = 12345
+            monitor._read_and_parse_dmesg()
+        self.assertEqual(monitor._event_aggregates[0]["count"], 1)
 
-    def test_get_dmesg_should_return_empty_on_command_failure(self):
+    def test_read_and_parse_dmesg_should_not_crash_on_failure(self):
         monitor = self._create_monitor()
-        with patch("azurelinuxagent.ga.kernel_event_monitor.run_command", side_effect=Exception("command failed")):
-            self.assertEqual(monitor._get_dmesg_output(), MonitorKernelSoftLockup._EMPTY_DMESG_OUTPUT)
+        with patch("azurelinuxagent.ga.kernel_event_monitor.shellutil") as mock_shellutil:
+            mock_shellutil._popen.side_effect = Exception("command failed")
+            monitor._read_and_parse_dmesg()
+        self.assertEqual(len(monitor._event_aggregates), 0)
 
     # -- Full operation ------------------------------------------------------
 
     def test_operation_should_parse_and_report(self):
         monitor = self._create_monitor()
-        with patch.object(monitor, "_get_dmesg_output", return_value=self.SAMPLE_DMESG_WITH_LOCKUPS):
+        with patch.object(monitor, "_read_and_parse_dmesg",
+                          side_effect=lambda: self._feed_dmesg(monitor, self.SAMPLE_DMESG_WITH_LOCKUPS)):
             with patch("azurelinuxagent.ga.kernel_event_monitor.add_event") as mock_add_event:
                 monitor._operation()
                 events = self._get_soft_lockup_events(mock_add_event)
@@ -217,11 +230,12 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
     def test_operation_watermark_persists_across_runs(self):
         """Second run with same dmesg should not report -- watermark filters old events."""
         monitor = self._create_monitor()
-        with patch.object(monitor, "_get_dmesg_output", return_value=self.SAMPLE_DMESG_WITH_LOCKUPS):
+        feed = lambda: self._feed_dmesg(monitor, self.SAMPLE_DMESG_WITH_LOCKUPS)
+        with patch.object(monitor, "_read_and_parse_dmesg", side_effect=feed):
             with patch("azurelinuxagent.ga.kernel_event_monitor.add_event"):
                 monitor._operation()
 
-        with patch.object(monitor, "_get_dmesg_output", return_value=self.SAMPLE_DMESG_WITH_LOCKUPS):
+        with patch.object(monitor, "_read_and_parse_dmesg", side_effect=feed):
             with patch("azurelinuxagent.ga.kernel_event_monitor.add_event") as mock_add_event:
                 monitor._operation()
                 self.assertEqual(len(self._get_soft_lockup_events(mock_add_event)), 0)

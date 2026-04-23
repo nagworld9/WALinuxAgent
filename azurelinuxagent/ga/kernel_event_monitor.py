@@ -32,11 +32,13 @@ import datetime
 import json
 import os
 import re
+import subprocess
 
 from azurelinuxagent.ga import state_dir
 import azurelinuxagent.common.logger as logger
 from azurelinuxagent.common.event import add_event, WALAEventOperation
 from azurelinuxagent.common.future import ustr
+from azurelinuxagent.common.utils import shellutil
 from azurelinuxagent.common.utils.shellutil import run_command
 from azurelinuxagent.common.version import AGENT_NAME
 from azurelinuxagent.ga.periodic_operation import PeriodicOperation
@@ -86,13 +88,7 @@ class MonitorKernelSoftLockup(PeriodicOperation):
     # Default timestamp watermark
     _DEFAULT_TIMESTAMP = 0.0
 
-    # Returned when dmesg output cannot be read
-    _EMPTY_DMESG_OUTPUT = ""
-
-    # Timeout in seconds for dmesg subprocess.
-    _DMESG_TIMEOUT_SECONDS = 60
     _PERIOD_SECONDS = 21600  # 6 hours
-    _MAX_DMESG_OUTPUT_BYTES = 20 * 1024 * 1024  # 20 MB cap for dmesg output
 
     @staticmethod
     def _is_dmesg_available():
@@ -177,60 +173,58 @@ class MonitorKernelSoftLockup(PeriodicOperation):
         except Exception as e:
             logger.warn("KernelSoftLockup: Failed to save state: {0}".format(ustr(e)))
 
-    def _get_dmesg_output(self):
+    def _read_and_parse_dmesg(self):
         """
-        Retrieve dmesg output from the kernel ring buffer.
-
-        Returns:
-            str: The dmesg output, or empty string on failure.
+        Stream dmesg output line by line and parse soft lockup events.
         """
+        process = None
         try:
-            # dmesg reads from an in-memory ring buffer (bounded by CONFIG_LOG_BUF_SHIFT).
-            # Cap output via 'tail --bytes ...' as a safety measure to avoid excessive 
-            # memory usage in case of an unexpectedly large output.
-            # run_command() ignores the timeout on Python 2.
-            output = run_command(
-                ['/bin/sh', '-c', 'dmesg | tail --bytes {0}'.format(self._MAX_DMESG_OUTPUT_BYTES)],
-                timeout=self._DMESG_TIMEOUT_SECONDS)
-            return output
+            process = shellutil._popen(['dmesg'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False)
+            for line in process.stdout:
+                if isinstance(line, bytes):
+                    line = line.decode('utf-8', errors='replace')
+                line = line.rstrip('\n')
+                self._parse_and_aggregate_soft_lockup_events(line)
+
+            process.wait()
         except Exception as e:
             logger.warn("KernelSoftLockup: Failed to read dmesg output: {0}".format(ustr(e)))
-            return self._EMPTY_DMESG_OUTPUT
+        finally:
+            if process is not None:
+                shellutil._on_command_completed(process.pid)
 
-    def _parse_and_aggregate_soft_lockup_events(self, dmesg_output):
+    def _parse_and_aggregate_soft_lockup_events(self, line):
         """
-        Parse dmesg output for CPU soft lockup events and aggregate them by CPU
-        directly into self._event_aggregates. Advances the watermark as it scans.
+        Parse a single dmesg line for CPU soft lockup events,
+        aggregate events by CPU ID, and advance the watermark.
         """
-        dmesg_output_lines = dmesg_output.split('\n')
-        for line in dmesg_output_lines:
-            timestamp_match = self._DMESG_TIMESTAMP_PATTERN.match(line)
-            if timestamp_match is None:
-                continue
+        timestamp_match = self._DMESG_TIMESTAMP_PATTERN.match(line)
+        if timestamp_match is None:
+            return
 
-            kernel_timestamp = float(timestamp_match.group('timestamp'))
-            if kernel_timestamp <= self._last_processed_timestamp:
-                continue
+        kernel_timestamp = float(timestamp_match.group('timestamp'))
+        if kernel_timestamp <= self._last_processed_timestamp:
+            return
 
-            self._last_processed_timestamp = kernel_timestamp
-            lockup_match = self._SOFT_LOCKUP_PATTERN.search(line)
-            if lockup_match is None:
-                continue
+        self._last_processed_timestamp = kernel_timestamp
+        lockup_match = self._SOFT_LOCKUP_PATTERN.search(line)
+        if lockup_match is None:
+            return
 
-            cpu_id = int(lockup_match.group('cpu_id'))
-            stuck_seconds = int(lockup_match.group('stuck_seconds'))
+        cpu_id = int(lockup_match.group('cpu_id'))
+        stuck_seconds = int(lockup_match.group('stuck_seconds'))
 
-            if cpu_id not in self._event_aggregates:
-                self._event_aggregates[cpu_id] = {
-                    "count": 0,
-                    "max_stuck_seconds": 0,
-                    "last_timestamp": kernel_timestamp
-                }
+        if cpu_id not in self._event_aggregates:
+            self._event_aggregates[cpu_id] = {
+                "count": 0,
+                "max_stuck_seconds": 0,
+                "last_timestamp": kernel_timestamp
+            }
 
-            agg = self._event_aggregates[cpu_id]
-            agg["count"] += 1
-            agg["max_stuck_seconds"] = max(agg["max_stuck_seconds"], stuck_seconds)
-            agg["last_timestamp"] = kernel_timestamp
+        agg = self._event_aggregates[cpu_id]
+        agg["count"] += 1
+        agg["max_stuck_seconds"] = max(agg["max_stuck_seconds"], stuck_seconds)
+        agg["last_timestamp"] = kernel_timestamp
 
     def _report_events(self):
         """Report aggregated soft lockup events via telemetry."""
@@ -277,11 +271,9 @@ class MonitorKernelSoftLockup(PeriodicOperation):
         Main operation: parse dmesg, aggregate new soft lockup events, and report.
         Exceptions are caught and logged by the base class (PeriodicOperation.run).
         """
-        dmesg_output = self._get_dmesg_output()
         previous_timestamp = self._last_processed_timestamp
-        if dmesg_output != self._EMPTY_DMESG_OUTPUT:
-            self._parse_and_aggregate_soft_lockup_events(dmesg_output)
-            self._report_events()
+        self._read_and_parse_dmesg()
+        self._report_events()
 
         if self._last_processed_timestamp != previous_timestamp:
             self._save_state()
