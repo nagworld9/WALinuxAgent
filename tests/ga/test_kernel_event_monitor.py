@@ -19,7 +19,7 @@ import json
 
 from azurelinuxagent.common.event import WALAEventOperation
 from azurelinuxagent.ga.kernel_event_monitor import MonitorKernelSoftLockup
-from tests.lib.tools import AgentTestCase, patch
+from tests.lib.tools import AgentTestCase, patch, MagicMock
 
 
 class TestMonitorKernelSoftLockup(AgentTestCase):
@@ -200,11 +200,12 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
     def test_read_and_parse_dmesg_should_parse_on_success(self):
         monitor = self._create_monitor()
         dmesg_line = "[12345.123456] BUG: soft lockup - CPU#0 stuck for 22s! [kworker/0:1:1234]"
+        mock_process = MagicMock()
+        mock_process.stdout = [dmesg_line.encode('utf-8')]
+        mock_process.wait.return_value = 0
+        mock_process.pid = 12345
         with patch("azurelinuxagent.ga.kernel_event_monitor.shellutil") as mock_shellutil:
-            mock_process = mock_shellutil._popen.return_value
-            mock_process.stdout = [dmesg_line.encode('utf-8')]
-            mock_process.wait.return_value = 0
-            mock_process.pid = 12345
+            mock_shellutil._popen.return_value = mock_process
             monitor._read_and_parse_dmesg()
             self.assertEqual(monitor._event_aggregates[0]["count"], 1)
 
