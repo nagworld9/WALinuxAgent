@@ -88,6 +88,9 @@ class MonitorKernelSoftLockup(PeriodicOperation):
     # Default timestamp watermark
     _DEFAULT_TIMESTAMP = 0.0
 
+    # Maximum number of affected CPUs to include in telemetry details; if exceeded, details will be truncated with a flag.
+    _MAX_CPU_DETAILS = 500
+
     _PERIOD_SECONDS = 21600  # 6 hours
 
     @staticmethod
@@ -249,7 +252,8 @@ class MonitorKernelSoftLockup(PeriodicOperation):
             payload = {
                 "totalSoftLockups": total_events,
                 "affectedCpuCount": affected_cpus,
-                "cpuDetails": per_cpu
+                "cpuDetailsTruncated": affected_cpus > self._MAX_CPU_DETAILS,
+                "cpuDetails": per_cpu[:self._MAX_CPU_DETAILS]
             }
             message = json.dumps(payload, separators=(',', ':'))
 
