@@ -479,7 +479,7 @@ time.sleep(120)
 
 class RunCommandGetOutputTestCase(AgentTestCase):
     def test_run_command_get_output_should_yield_stdout_lines(self):
-        output = list(shellutil.run_command_get_output(["echo", "-e", "line1\nline2\nline3"]))
+        output = list(shellutil.run_command_get_output(["printf", "line1\nline2\nline3\n"]))
         self.assertEqual(output, ["line1", "line2", "line3"])
 
     def test_run_command_get_output_should_yield_empty_list_for_no_output(self):

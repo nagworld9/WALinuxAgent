@@ -360,21 +360,26 @@ def run_command_get_output(command):
     Executes the given command and yields stdout lines as strings.
     Processes stdout line-by-line rather than buffering the entire output.
     """
-    process = _popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False)
+    stderr_file = tempfile.TemporaryFile()
     try:
-        for line in process.stdout:
-            yield __encode_command_output(line).rstrip('\n')
+        process = _popen(command, stdout=subprocess.PIPE, stderr=stderr_file, shell=False)
+        try:
+            for line in process.stdout:
+                yield __encode_command_output(line).rstrip('\n')
 
-        process.wait()
-        if process.returncode != 0:
-            command_stderr = __encode_command_output(process.stderr.read())
-            logger.error(
-                "Command: [{0}], return code: [{1}], stderr: [{2}]",
-                __format_command(command),
-                process.returncode,
-                command_stderr)
+            process.wait()
+            if process.returncode != 0:
+                stderr_file.seek(0)
+                command_stderr = __encode_command_output(stderr_file.read())
+                logger.error(
+                    "Command: [{0}], return code: [{1}], stderr: [{2}]",
+                    __format_command(command),
+                    process.returncode,
+                    command_stderr)
+        finally:
+            _on_command_completed(process.pid)
     finally:
-        _on_command_completed(process.pid)
+        stderr_file.close()
 
 
 def quote(word_list):
