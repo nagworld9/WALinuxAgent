@@ -477,5 +477,31 @@ time.sleep(120)
                 thread.join(timeout=5)
 
 
+class RunCommandGetOutputTestCase(AgentTestCase):
+    def test_run_command_get_output_should_yield_stdout_lines(self):
+        output = list(shellutil.run_command_get_output(["echo", "-e", "line1\nline2\nline3"]))
+        self.assertEqual(output, ["line1", "line2", "line3"])
+
+    def test_run_command_get_output_should_yield_empty_list_for_no_output(self):
+        output = list(shellutil.run_command_get_output(["true"]))
+        self.assertEqual(output, [])
+
+    def test_run_command_get_output_should_log_error_on_non_zero_exit(self):
+        with patch("azurelinuxagent.common.utils.shellutil.logger.error") as mock_log_error:
+            list(shellutil.run_command_get_output(["ls", "nonexistent_file"]))
+            self.assertEqual(mock_log_error.call_count, 1)
+
+    def test_run_command_get_output_should_not_log_on_success(self):
+        with patch("azurelinuxagent.common.utils.shellutil.logger.error") as mock_log_error:
+            list(shellutil.run_command_get_output(["echo", "hello"]))
+            self.assertEqual(mock_log_error.call_count, 0)
+
+    def test_run_command_get_output_should_track_process(self):
+        with patch("azurelinuxagent.common.utils.shellutil.subprocess.Popen", wraps=subprocess.Popen) as popen_patch:
+            list(shellutil.run_command_get_output(["echo", "hello"]))
+            args, kwargs = popen_patch.call_args
+            self.assertEqual(kwargs['env'].get(shellutil.PARENT_PROCESS_NAME), shellutil.AZURE_GUEST_AGENT)
+
+
 if __name__ == '__main__':
     unittest.main()

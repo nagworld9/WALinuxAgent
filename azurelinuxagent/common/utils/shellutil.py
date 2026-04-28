@@ -355,6 +355,28 @@ def run_pipe(pipe, stdin=None, stdout=subprocess.PIPE, stderr=subprocess.PIPE, l
     return __run_command(command_action=command_action, command=pipe, log_error=log_error, encode_output=encode_output)
 
 
+def run_command_get_output(command):
+    """
+    Executes the given command and yields stdout lines as strings.
+    Processes stdout line-by-line rather than buffering the entire output.
+    """
+    process = _popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False)
+    try:
+        for line in process.stdout:
+            yield __encode_command_output(line).rstrip('\n')
+
+        process.wait()
+        if process.returncode != 0:
+            command_stderr = __encode_command_output(process.stderr.read())
+            logger.error(
+                "Command: [{0}], return code: [{1}], stderr: [{2}]",
+                __format_command(command),
+                process.returncode,
+                command_stderr)
+    finally:
+        _on_command_completed(process.pid)
+
+
 def quote(word_list):
     """
     Quote a list or tuple of strings for Unix Shell as words, using the

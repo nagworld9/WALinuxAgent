@@ -32,14 +32,12 @@ import datetime
 import json
 import os
 import re
-import subprocess
 
 from azurelinuxagent.ga import state_dir
 import azurelinuxagent.common.logger as logger
 from azurelinuxagent.common.event import add_event, WALAEventOperation
 from azurelinuxagent.common.future import ustr
-from azurelinuxagent.common.utils import shellutil
-from azurelinuxagent.common.utils.shellutil import run_command
+from azurelinuxagent.common.utils.shellutil import run_command, run_command_get_output
 from azurelinuxagent.common.version import AGENT_NAME
 from azurelinuxagent.ga.periodic_operation import PeriodicOperation
 
@@ -180,23 +178,11 @@ class MonitorKernelSoftLockup(PeriodicOperation):
         """
         Stream dmesg output line by line and parse soft lockup events.
         """
-        process = None
         try:
-            process = shellutil._popen(['dmesg'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False)
-            for line in process.stdout:
-                if isinstance(line, bytes):
-                    line = line.decode('utf-8', 'replace')
-                line = line.rstrip('\n')
+            for line in run_command_get_output(['dmesg']):
                 self._parse_and_aggregate_soft_lockup_events(line)
-
-            returncode = process.wait()
-            if returncode != 0:
-                logger.warn("KernelSoftLockup: dmesg exited with return code {0}".format(returncode))
         except Exception as e:
             logger.warn("KernelSoftLockup: Failed to read dmesg output: {0}".format(ustr(e)))
-        finally:
-            if process is not None:
-                shellutil._on_command_completed(process.pid)
 
     def _parse_and_aggregate_soft_lockup_events(self, line):
         """
