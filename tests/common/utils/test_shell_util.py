@@ -499,7 +499,7 @@ class RunCommandGetOutputTestCase(AgentTestCase):
     def test_run_command_get_output_should_track_process(self):
         with patch("azurelinuxagent.common.utils.shellutil.subprocess.Popen", wraps=subprocess.Popen) as popen_patch:
             list(shellutil.run_command_get_output(["echo", "hello"]))
-            args, kwargs = popen_patch.call_args
+            _, kwargs = popen_patch.call_args
             self.assertEqual(kwargs['env'].get(shellutil.PARENT_PROCESS_NAME), shellutil.AZURE_GUEST_AGENT)
 
 
