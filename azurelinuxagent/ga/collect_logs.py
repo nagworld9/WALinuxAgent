@@ -162,7 +162,7 @@ class CollectLogsHandler(ThreadHandlerInterface):
         # If the stop event is set during the initial delay (e.g. shutdown was requested), return immediately
         # without starting log collection.
         self._interruptible_sleep(conf.get_log_collector_initial_delay())
-        if self.stopped():
+        if self._is_stop_signaled():
             return
 
         try:

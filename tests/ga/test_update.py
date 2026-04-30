@@ -936,7 +936,7 @@ class TestUpdate(UpdateTestCase):
         self.assertEqual("SendTelemetryHandler", stop_order[1],
             "SendTelemetryHandler must be stopped after TelemetryEventsCollector so it can drain remaining events")
         # The remaining (independent) handlers may be stopped in any order
-        self.assertEqual({"MonitorHandler", "EnvHandler"}, set(stop_order[2:]))
+        self.assertEqual(set(["MonitorHandler", "EnvHandler"]), set(stop_order[2:]))
 
         self.assertFalse(self.update_handler.is_running)
 
