@@ -10,3 +10,7 @@ tests:
 images:
   - "endorsed"
   - "endorsed-arm64"
+skip_on_images:
+  # Oracle 7.9 is excluded from this test, since agent stop behaving differently and
+  # not waiting for the background threads to stop before exiting, which causes the test to fail.
+  - "oracle_79"

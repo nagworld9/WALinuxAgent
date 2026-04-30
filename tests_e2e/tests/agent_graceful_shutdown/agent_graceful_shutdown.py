@@ -34,6 +34,8 @@ import random
 import re
 import time
 
+from typing import Any, Dict, List
+
 from assertpy import fail
 
 from tests_e2e.tests.lib.agent_test import AgentVmTest
@@ -287,6 +289,17 @@ class AgentGracefulShutdown(AgentVmTest):
             log.info(
                 "Graceful shutdown completed in %.2fs and all %d threads stopped successfully.",
                 elapsed, len(expected_threads))
+
+    def get_ignore_error_rules(self) -> List[Dict[str, Any]]:
+        # The test deliberately stresses the per-thread join timeout (5s) by stopping the agent at
+        # random points -- including when the log collector is mid systemd-run, the telemetry sender
+        # is mid network call, etc. Threads that overshoot the per-thread join still finish cleanly
+        # well within the overall _MAX_SHUTDOWN_SECONDS bound (which is enforced separately above),
+        # so the resulting "thread did not stop within the timeout" warning is expected and should
+        # not be flagged as a detected error by the agent-log scanner.
+        return [
+            {'message': r"\w+ thread did not stop within the timeout"},
+        ]
 
 
 if __name__ == "__main__":
