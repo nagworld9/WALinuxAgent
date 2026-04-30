@@ -1,0 +1,11 @@
+#
+# This test validates that the ext-handler shuts down gracefully when SIGTERM is delivered to it
+# (e.g. by `systemctl stop`). It checks that every background thread the agent starts is signaled
+# to stop, exits within the join timeout.
+#
+name: "AgentGracefulShutdown"
+tests:
+  - "agent_graceful_shutdown/agent_graceful_shutdown.py"
+images:
+  - "endorsed"
+  - "endorsed-arm64"

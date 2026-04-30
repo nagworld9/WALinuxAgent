@@ -26,6 +26,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -181,8 +182,10 @@ class UpdateHandler(object):
         # List of thread handlers managed by this UpdateHandler; populated in run() and used during shutdown
         self._all_thread_handlers = []
 
-        # Guard to prevent a second SIGTERM from interrupting the first handler mid-execution
-        self._handle_sigterm_in_progress = False
+        # Mutual-exclusion lock used by the SIGTERM handler. Only the first SIGTERM that successfully
+        # acquires this lock is allowed to enter the shutdown block; every subsequent invocation of the
+        # handler will fail to acquire it and return immediately.
+        self._shutdown_lock = threading.Lock()
 
         if not conf.get_extensions_enabled():
             self._goal_state_period = GOAL_STATE_PERIOD_EXTENSIONS_DISABLED
@@ -338,10 +341,14 @@ class UpdateHandler(object):
 
         def handle_sigterm(signum, _frame):
             if signum == signal.SIGTERM:
-                if self._handle_sigterm_in_progress:
+                # Take ownership of the shutdown sequence. acquire(False) is non-blocking and
+                # atomic: exactly one caller will get True; every other caller (a duplicate SIGTERM,
+                # whether from systemd, the daemon's forward_signal)
+                # will get False and return without entering the shutdown block below. We never release
+                # the lock because the winning handler ends with sys.exit(0).
+                if not self._shutdown_lock.acquire(False):
                     logger.info("SIGTERM handler already in progress for ext handler, ignoring duplicate signal")
                     return
-                self._handle_sigterm_in_progress = True
                 logger.info("SIGTERM received for ext handler, shutting down gracefully...")
                 self._shutdown()
                 sys.exit(0)
@@ -1086,17 +1093,49 @@ class UpdateHandler(object):
         return os.path.join(conf.get_lib_dir(), INITIAL_GOAL_STATE_FILE)
 
     def _shutdown(self):
+        # _shutdown() runs in two different processes when SIGTERM is delivered (the daemon process and
+        # the ext-handler child process), so we need to be careful about race conditions in this code block.
         self.is_running = False
 
-        # Stop all thread handlers gracefully. Each handler's stop() signals the thread to exit (by setting its
-        # should_run/stopped flag and its stop event) and then joins the thread, allowing it to complete its current
-        # operation before stopping. The handlers are stopped in reverse order; if a dependency exists between
-        # handlers, stopping in reverse allows the dependent handlers to stop first, which reduces the chance of
-        # hitting issues during shutdown.
-        for thread_handler in reversed(self._all_thread_handlers):
+        # Build an explicit shutdown order so we don't rely on the order of items in self._all_thread_handlers.
+        #
+        # Inter-thread dependencies handled here:
+        #   * CollectTelemetryEventsHandler ("TelemetryEventsCollector") produces events into the queue owned by
+        #     SendTelemetryEventsHandler ("SendTelemetryHandler"). If the sender stops first, the collector will
+        #     fail when it tries to enqueue more events. So we always stop the collector first, then the sender
+        #     (which drains its remaining queue items and exits).
+        #
+        # All other thread handlers are independent of each other and can be stopped in any order; we stop them
+        # after the telemetry pair.
+        ordered_thread_names = ["TelemetryEventsCollector", "SendTelemetryHandler"]
+        handlers_by_name = {h.get_thread_name(): h for h in self._all_thread_handlers}
+
+        ordered_handlers = []
+        for name in ordered_thread_names:
+            handler = handlers_by_name.pop(name, None)
+            if handler is not None:
+                ordered_handlers.append(handler)
+        # Append the remaining (independent) handlers
+        ordered_handlers.extend(handlers_by_name.values())
+
+        # Step 1: signal every handler to stop (non-blocking). Doing this up-front lets the threads start
+        # winding down in parallel rather than serializing the per-thread join timeout in phase 2.
+        for thread_handler in ordered_handlers:
+            try:
+                logger.info("Signaling {0} thread to stop...", thread_handler.get_thread_name())
+                thread_handler.signal_stop()
+            except Exception as e:
+                logger.warn(
+                    u"Exception signaling thread {0} to stop: {1}",
+                    thread_handler.get_thread_name(),
+                    ustr(e))
+
+        # Step 2: wait for each handler to finish, in dependency order. signal_stop() above is idempotent,
+        # so calling stop() here just performs the join.
+        for thread_handler in ordered_handlers:
             try:
                 thread_name = thread_handler.get_thread_name()
-                logger.info("Stopping {0} thread...", thread_name)
+                logger.info("Waiting for {0} thread to stop...", thread_name)
                 thread_handler.stop()
                 if thread_handler.is_alive():
                     logger.warn("{0} thread did not stop within the timeout", thread_name)

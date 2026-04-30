@@ -251,10 +251,10 @@ class EnvHandler(ThreadHandlerInterface):
         return EnvHandler._THREAD_NAME
 
     def __init__(self):
+        super(EnvHandler, self).__init__()
         self.stopped = True
         self.hostname = None
         self.env_thread = None
-        self._stop_event = threading.Event()
 
     def run(self):
         if not self.stopped:
@@ -269,7 +269,7 @@ class EnvHandler(ThreadHandlerInterface):
         return self.env_thread is not None and self.env_thread.is_alive()
 
     def start(self):
-        self._stop_event.clear()
+        self._reset_stop_event()
         self.env_thread = threading.Thread(target=self.daemon)
         self.env_thread.daemon = True
         self.env_thread.name = self.get_thread_name()
@@ -297,8 +297,8 @@ class EnvHandler(ThreadHandlerInterface):
                 periodic_operations.append(MonitorHostNameChanges(osutil))
             while not self.stopped:
                 try:
-                    for op in periodic_operations:
-                        op.run()
+                    # Do not start the next operation if the thread has been signaled to stop.
+                    self._run_periodic_operations(periodic_operations)
                 except Exception as e:
                     logger.error("An error occurred in the environment thread main loop; will skip the current iteration.\n{0}", ustr(e))
                 finally:
@@ -306,11 +306,15 @@ class EnvHandler(ThreadHandlerInterface):
         except Exception as e:
             logger.error("An error occurred in the environment thread; will exit the thread.\n{0}", ustr(e))
 
+    def signal_stop(self):
+        # Signal the daemon loop to exit without blocking on the thread to finish.
+        self.stopped = True
+        self._signal_stop()
+
     def stop(self):
         """
         Stop server communication and join the thread to main thread.
         """
-        self.stopped = True
-        self._stop_event.set()
+        self.signal_stop()
         if self.env_thread is not None:
             self.env_thread.join(timeout=self._THREAD_JOIN_TIMEOUT)

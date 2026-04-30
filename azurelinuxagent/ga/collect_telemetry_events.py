@@ -578,10 +578,10 @@ class CollectTelemetryEventsHandler(ThreadHandlerInterface):
     _THREAD_NAME = "TelemetryEventsCollector"
 
     def __init__(self, send_telemetry_events_handler):
+        super(CollectTelemetryEventsHandler, self).__init__()
         self.should_run = True
         self.thread = None
         self._send_telemetry_events_handler = send_telemetry_events_handler
-        self._stop_event = threading.Event()
 
     @staticmethod
     def get_thread_name():
@@ -595,18 +595,22 @@ class CollectTelemetryEventsHandler(ThreadHandlerInterface):
         return self.thread is not None and self.thread.is_alive()
 
     def start(self):
-        self._stop_event.clear()
+        self._reset_stop_event()
         self.thread = threading.Thread(target=self.daemon)
         self.thread.daemon = True
         self.thread.name = CollectTelemetryEventsHandler.get_thread_name()
         self.thread.start()
 
+    def signal_stop(self):
+        # Signal the daemon loop to exit without blocking on the thread to finish.
+        self.should_run = False
+        self._signal_stop()
+
     def stop(self):
         """
         Stop server communication and join the thread to main thread.
         """
-        self.should_run = False
-        self._stop_event.set()
+        self.signal_stop()
         if self.is_alive():
             self.thread.join(timeout=self._THREAD_JOIN_TIMEOUT)
 
@@ -626,8 +630,8 @@ class CollectTelemetryEventsHandler(ThreadHandlerInterface):
         logger.info("Successfully started the {0} thread".format(self.get_thread_name()))
         while not self.stopped():
             try:
-                for periodic_op in periodic_operations:
-                    periodic_op.run()
+                # Do not start the next operation if the thread has been signaled to stop.
+                self._run_periodic_operations(periodic_operations)
 
             except Exception as error:
                 logger.warn(

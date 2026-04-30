@@ -900,26 +900,43 @@ class TestUpdate(UpdateTestCase):
         self.assertFalse(os.path.isfile(self.update_handler._sentinel_file_path()))
 
     def test_shutdown_stops_all_threads(self):
-        # Create mock thread handlers and track the order in which stop() is called
+        # Create mock thread handlers and track the order in which signal_stop()/stop() are called.
+        # Note: we deliberately list the telemetry pair *before* the independent handlers in the input list,
+        # to verify that _shutdown() does not rely on input order and instead uses an explicit dependency
+        # ordering (TelemetryEventsCollector first, then SendTelemetryHandler, then the rest).
         call_order = []
         mock_handlers = []
-        for name in ["MonitorHandler", "EnvHandler", "SendTelemetryHandler", "TelemetryEventsCollector"]:
+        for name in ["SendTelemetryHandler", "TelemetryEventsCollector", "MonitorHandler", "EnvHandler"]:
             handler = MagicMock()
             handler.get_thread_name.return_value = name
             handler.is_alive.return_value = False
-            handler.stop.side_effect = lambda n=name: call_order.append(n)
+            handler.signal_stop.side_effect = lambda n=name: call_order.append(("signal", n))
+            handler.stop.side_effect = lambda n=name: call_order.append(("stop", n))
             mock_handlers.append(handler)
 
         self.update_handler._all_thread_handlers = mock_handlers
         self.update_handler._shutdown()
 
-        # Verify stop() was called on each handler
+        # Verify signal_stop() and stop() were each called once on every handler
         for handler in mock_handlers:
+            self.assertEqual(1, handler.signal_stop.call_count)
             self.assertEqual(1, handler.stop.call_count)
 
-        # Verify handlers were stopped in reverse order
-        expected_order = ["TelemetryEventsCollector", "SendTelemetryHandler", "EnvHandler", "MonitorHandler"]
-        self.assertEqual(expected_order, call_order, "Handlers should be stopped in reverse order")
+        # Verify two-phase behavior: every signal_stop() must happen before any stop().
+        signal_indices = [i for i, (kind, _) in enumerate(call_order) if kind == "signal"]
+        stop_indices = [i for i, (kind, _) in enumerate(call_order) if kind == "stop"]
+        self.assertLess(max(signal_indices), min(stop_indices),
+            "All threads must be signaled to stop before we wait for any thread to finish")
+
+        # Within the stop() phase, verify the explicit dependency order: collector first (so it stops
+        # enqueueing events), then sender (so it can drain its queue), then the remaining independent handlers.
+        stop_order = [name for kind, name in call_order if kind == "stop"]
+        self.assertEqual("TelemetryEventsCollector", stop_order[0],
+            "TelemetryEventsCollector must be stopped first so it stops producing events for SendTelemetryHandler")
+        self.assertEqual("SendTelemetryHandler", stop_order[1],
+            "SendTelemetryHandler must be stopped after TelemetryEventsCollector so it can drain remaining events")
+        # The remaining (independent) handlers may be stopped in any order
+        self.assertEqual({"MonitorHandler", "EnvHandler"}, set(stop_order[2:]))
 
         self.assertFalse(self.update_handler.is_running)
 
@@ -938,31 +955,126 @@ class TestUpdate(UpdateTestCase):
             mock_logger.warn.assert_any_call("{0} thread did not stop within the timeout", "StuckThread")
 
     def test_shutdown_continues_if_thread_stop_raises_exception(self):
-        # _shutdown() iterates in reverse order, so the last handler in the list is stopped first.
-        # Place the failing handler last to verify that an exception during its stop() does not
-        # prevent the remaining handlers from being stopped.
-        call_order = []
-
+        # This test verifies that an exception during one handler's stop() does not prevent the
+        # remaining handlers from being stopped.
         good_handler = MagicMock()
         good_handler.get_thread_name.return_value = "GoodThread"
         good_handler.is_alive.return_value = False
-        good_handler.stop.side_effect = lambda: call_order.append("GoodThread")
 
         failing_handler = MagicMock()
         failing_handler.get_thread_name.return_value = "FailingThread"
-        def _raise_on_stop():
-            call_order.append("FailingThread")
-            raise Exception("test error")
-        failing_handler.stop.side_effect = _raise_on_stop
+        failing_handler.stop.side_effect = Exception("test error")
 
-        # failing_handler is last, so it is stopped first in reverse order
-        self.update_handler._all_thread_handlers = [good_handler, failing_handler]
+        self.update_handler._all_thread_handlers = [failing_handler, good_handler]
         self.update_handler._shutdown()
 
-        # Verify both were stopped in reverse order despite the exception
-        self.assertEqual(["FailingThread", "GoodThread"], call_order,
-            "FailingThread should be stopped first (reverse order), and the exception should not prevent GoodThread from being stopped")
+        # Both stop() methods must have been called, despite the exception raised by failing_handler
+        self.assertEqual(1, failing_handler.stop.call_count,
+            "FailingThread.stop() should have been called")
+        self.assertEqual(1, good_handler.stop.call_count,
+            "GoodThread.stop() should have been called even though FailingThread.stop() raised an exception")
         self.assertFalse(self.update_handler.is_running)
+
+    def test_shutdown_signals_in_parallel_before_joining(self):
+        """
+        Verifies that Step 1 (signal_stop) is broadcast to every handler before Step 2 (join) begins.
+        This is what allows healthy threads to wind down concurrently rather than serializing each
+        handler's join timeout.
+        """
+        signal_times = {}
+        stop_times = {}
+
+        def make_handler(name, stop_delay):
+            handler = MagicMock()
+            handler.get_thread_name.return_value = name
+            handler.is_alive.return_value = False
+            handler.signal_stop.side_effect = lambda n=name: signal_times.__setitem__(n, time.time())
+            # Simulate a slow join in stop() so we can measure that all signal_stop() calls happened
+            # *before* we ever block on the first stop().
+            def _slow_stop(n=name, d=stop_delay):
+                stop_times[n] = time.time()
+                time.sleep(d)
+            handler.stop.side_effect = _slow_stop
+            return handler
+
+        slow = make_handler("SlowThread", stop_delay=0.3)
+        fast1 = make_handler("MonitorHandler", stop_delay=0.0)
+        fast2 = make_handler("EnvHandler", stop_delay=0.0)
+
+        # Place the slow handler first so that, if shutdown were sequential (signal+stop per handler),
+        # the other handlers' signal_stop() calls would only happen *after* the slow stop() finished.
+        self.update_handler._all_thread_handlers = [slow, fast1, fast2]
+        self.update_handler._shutdown()
+
+        # Every signal_stop() must have happened before the first stop() began — that is the parallelism guarantee.
+        latest_signal = max(signal_times.values())
+        earliest_stop = min(stop_times.values())
+        self.assertLessEqual(latest_signal, earliest_stop,
+            "All signal_stop() calls must complete before any stop()/join begins; "
+            "signal_times={0}, stop_times={1}".format(signal_times, stop_times))
+
+    def test_sigterm_handler_invokes_shutdown(self):
+        """
+        Validates the SIGTERM path: capture the handler installed by run(), invoke it as
+        the signal subsystem would, and verify it triggers _shutdown() with the duplicate-signal guard
+        working correctly. We patch signal.signal to capture the handler and immediately raise
+        ExitException so run() unwinds without going through the rest of its initialization.
+        """
+        import signal as _signal
+
+        captured = {}
+
+        class _BailOut(Exception):
+            pass
+
+        def fake_signal(signum, handler):
+            if signum == _signal.SIGTERM:
+                captured["handler"] = handler
+                # Exit run() immediately after the handler is installed; any exception from run()'s
+                # initialization is logged and swallowed by run(), so we wrap with a try/except below.
+                raise _BailOut("captured handler; bailing out of run()")
+            return _signal.SIG_DFL
+
+        # Keep _shutdown patched across both run() (which installs the handler) and the subsequent
+        # invocations of the captured handler — otherwise the mock would be reverted by the time
+        # the handler is called and call_count would stay at 0.
+        with patch.object(self.update_handler, "_shutdown") as mock_shutdown:
+            with patch("azurelinuxagent.ga.update.signal.signal", side_effect=fake_signal):
+                with patch("sys.exit"):
+                    try:
+                        self.update_handler.run()
+                    except _BailOut:
+                        pass
+
+            # The SIGTERM handler should have been installed
+            self.assertIn("handler", captured, "run() did not install a SIGTERM handler")
+            sigterm_handler = captured["handler"]
+            self.assertTrue(callable(sigterm_handler))
+
+            # First invocation triggers _shutdown()
+            with patch("sys.exit") as mock_exit:
+                sigterm_handler(_signal.SIGTERM, None)
+            self.assertEqual(1, mock_shutdown.call_count,
+                "First SIGTERM should trigger _shutdown()")
+            self.assertEqual(1, mock_exit.call_count,
+                "First SIGTERM should call sys.exit(0)")
+
+            # Duplicate SIGTERM must be ignored
+            with patch("sys.exit") as mock_exit_again:
+                sigterm_handler(_signal.SIGTERM, None)
+            self.assertEqual(1, mock_shutdown.call_count,
+                "Duplicate SIGTERM should NOT trigger _shutdown() again")
+            self.assertEqual(0, mock_exit_again.call_count,
+                "Duplicate SIGTERM should NOT call sys.exit again")
+
+            # Non-SIGTERM signals must be ignored entirely (the handler is only installed for SIGTERM,
+            # but defensively check that an unrelated signum is a no-op).
+            with patch("sys.exit") as mock_exit_other:
+                sigterm_handler(_signal.SIGINT, None)
+            self.assertEqual(1, mock_shutdown.call_count,
+                "Non-SIGTERM signal should not trigger _shutdown()")
+            self.assertEqual(0, mock_exit_other.call_count,
+                "Non-SIGTERM signal should not call sys.exit")
 
     def test_shutdown_ignores_missing_sentinel_file(self):
         self.assertFalse(os.path.isfile(self.update_handler._sentinel_file_path()))

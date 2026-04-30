@@ -105,6 +105,7 @@ class CollectLogsHandler(ThreadHandlerInterface):
         return False
 
     def __init__(self):
+        super(CollectLogsHandler, self).__init__()
         self.protocol = None
         self.protocol_util = None
         self.event_thread = None
@@ -112,7 +113,6 @@ class CollectLogsHandler(ThreadHandlerInterface):
         self.last_state = None
         self.period = conf.get_collect_logs_period()
         self.log_collector_cgroup_path_validation_errors = 0
-        self._stop_event = threading.Event()
 
     def run(self):
         self.start()
@@ -124,7 +124,7 @@ class CollectLogsHandler(ThreadHandlerInterface):
         return self.event_thread is not None and self.event_thread.is_alive()
 
     def start(self):
-        self._stop_event.clear()
+        self._reset_stop_event()
         self.event_thread = threading.Thread(target=self.daemon)
         self.event_thread.daemon = True
         self.event_thread.name = self.get_thread_name()
@@ -136,9 +136,13 @@ class CollectLogsHandler(ThreadHandlerInterface):
     def stopped(self):
         return not self.should_run
 
-    def stop(self):
+    def signal_stop(self):
+        # Signal the daemon loop to exit without blocking on the thread to finish.
         self.should_run = False
-        self._stop_event.set()
+        self._signal_stop()
+
+    def stop(self):
+        self.signal_stop()
         if self.is_alive():
             try:
                 self.join()
@@ -155,7 +159,11 @@ class CollectLogsHandler(ThreadHandlerInterface):
     def daemon(self):
         # Delay the first collector on start up to give short lived VMs (that might be dead before the second 
         # collection has a chance to run) an opportunity to do produce meaningful logs to collect.
-        self._stop_event.wait(conf.get_log_collector_initial_delay())
+        # If the stop event is set during the initial delay (e.g. shutdown was requested), return immediately
+        # without starting log collection.
+        self._interruptible_sleep(conf.get_log_collector_initial_delay())
+        if self.stopped():
+            return
 
         try:
             CollectLogsHandler.enable_monitor_cgroups_check()
@@ -169,7 +177,7 @@ class CollectLogsHandler(ThreadHandlerInterface):
                     logger.error("An error occurred in the log collection thread main loop; "
                                  "will skip the current iteration.\n{0}", ustr(e))
                 finally:
-                    self._stop_event.wait(self.period)
+                    self._interruptible_sleep(self.period)
         except Exception as e:
             logger.error("An error occurred in the log collection thread; will exit the thread.\n{0}", ustr(e))
         finally:

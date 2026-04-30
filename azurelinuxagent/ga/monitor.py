@@ -258,16 +258,20 @@ class MonitorHandler(ThreadHandlerInterface):
         return MonitorHandler._THREAD_NAME
 
     def __init__(self):
+        super(MonitorHandler, self).__init__()
         self.monitor_thread = None
         self.should_run = True
-        self._stop_event = threading.Event()
 
     def run(self):
         self.start()
 
-    def stop(self):
+    def signal_stop(self):
+        # Signal the daemon loop to exit without blocking on the thread to finish.
         self.should_run = False
-        self._stop_event.set()
+        self._signal_stop()
+
+    def stop(self):
+        self.signal_stop()
         if self.is_alive():
             self.join()
 
@@ -281,7 +285,7 @@ class MonitorHandler(ThreadHandlerInterface):
         return self.monitor_thread is not None and self.monitor_thread.is_alive()
 
     def start(self):
-        self._stop_event.clear()
+        self._reset_stop_event()
         self.monitor_thread = threading.Thread(target=self.daemon)
         self.monitor_thread.daemon = True
         self.monitor_thread.name = self.get_thread_name()
@@ -312,8 +316,8 @@ class MonitorHandler(ThreadHandlerInterface):
 
             while not self.stopped():
                 try:
-                    for op in periodic_operations:
-                        op.run()
+                    # Do not start the next operation if the thread has been signaled to stop.
+                    self._run_periodic_operations(periodic_operations)
                 finally:
                     PeriodicOperation.sleep_until_next_operation(periodic_operations, self._stop_event)
         except Exception as e:

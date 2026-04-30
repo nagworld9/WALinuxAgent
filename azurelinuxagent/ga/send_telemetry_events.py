@@ -44,6 +44,7 @@ class SendTelemetryEventsHandler(ThreadHandlerInterface):
     _MIN_BATCH_WAIT_TIME = datetime.timedelta(seconds=5)
 
     def __init__(self, protocol_util):
+        super(SendTelemetryEventsHandler, self).__init__()
         self._protocol = protocol_util.get_protocol()
         self.should_run = True
         self._thread = None
@@ -74,11 +75,16 @@ class SendTelemetryEventsHandler(ThreadHandlerInterface):
         self._thread.name = self.get_thread_name()
         self._thread.start()
 
+    def signal_stop(self):
+        # Signal the daemon loop to exit without blocking on the thread to finish. The processing loop
+        # is queue-driven, so it will wake up on the next queue timeout (or sooner) and observe stopped().
+        self.should_run = False
+
     def stop(self):
         """
         Stop server communication and join the thread to main thread.
         """
-        self.should_run = False
+        self.signal_stop()
         if self.is_alive():
             self.join()
 
