@@ -71,8 +71,7 @@ class PeriodicOperation(object):
 
         stop_event (threading.Event) is required: the sleep is implemented via stop_event.wait(), so setting the
         event from another thread interrupts the sleep immediately. This is what allows handlers to wake up
-        promptly when shutdown is signaled instead of sleeping through the shutdown window. All call sites must
-        pass a valid threading.Event; passing None will raise AttributeError when wait() is invoked.
+        promptly when shutdown is signaled instead of sleeping through the shutdown window.
         """
         next_operation_time = min(op.next_run_time() for op in operations)
 

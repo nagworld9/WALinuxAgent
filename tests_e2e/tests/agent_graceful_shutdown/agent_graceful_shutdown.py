@@ -193,6 +193,24 @@ class AgentGracefulShutdown(AgentVmTest):
 
         log.info("Shutdown log:\n%s", "\n".join("        " + ln for ln in shutdown_log.splitlines()))
 
+
+        # Checking if log collection is allowed at this time [True]...
+        # We use grep -F (fixed string) to avoid any regex interpretation of the brackets.
+        expected_threads = list(_EXPECTED_THREADS)
+        try:
+            ssh_client.run_command(
+                "grep -qF 'log collection is allowed at this time [True]' /var/log/waagent.log",
+                use_sudo=True,
+            )
+            log_collection_enabled = True
+        except CommandError:
+            log_collection_enabled = False
+        if not log_collection_enabled:
+            log.info(
+                "Log collection is not enabled on this VM (is_log_collection_allowed() returned "
+                "False); skipping CollectLogsHandler assertions for this iteration.")
+            expected_threads = [t for t in expected_threads if t != "CollectLogsHandler"]
+
         # Per-thread validation. We deliberately do NOT fail when a single thread reports
         # "did not stop within the timeout": the per-thread join timeout is only 5s, and a thread
         # that is mid-operation (e.g. the log collector running systemd-run, the telemetry sender
@@ -207,7 +225,7 @@ class AgentGracefulShutdown(AgentVmTest):
         # just stop treating the occasional 5s-overshoot as a hard failure.
         missing = []
         timed_out = []
-        for thread_name in _EXPECTED_THREADS:
+        for thread_name in expected_threads:
             signal_re = r"Signaling {0} thread to stop".format(re.escape(thread_name))
             stopped_re = r"{0} thread stopped successfully".format(re.escape(thread_name))
             timed_out_re = r"{0} thread did not stop within the timeout".format(re.escape(thread_name))
@@ -264,11 +282,11 @@ class AgentGracefulShutdown(AgentVmTest):
             log.info(
                 "Graceful shutdown completed in %.2fs; %d/%d thread(s) stopped within the per-thread "
                 "join timeout, %d exceeded it but the overall shutdown was still within bounds.",
-                elapsed, len(_EXPECTED_THREADS) - len(timed_out), len(_EXPECTED_THREADS), len(timed_out))
+                elapsed, len(expected_threads) - len(timed_out), len(expected_threads), len(timed_out))
         else:
             log.info(
                 "Graceful shutdown completed in %.2fs and all %d threads stopped successfully.",
-                elapsed, len(_EXPECTED_THREADS))
+                elapsed, len(expected_threads))
 
 
 if __name__ == "__main__":

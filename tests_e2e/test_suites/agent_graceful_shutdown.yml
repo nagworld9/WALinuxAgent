@@ -1,7 +1,8 @@
 #
 # This test validates that the ext-handler shuts down gracefully when SIGTERM is delivered to it
 # (e.g. by `systemctl stop`). It checks that every background thread the agent starts is signaled
-# to stop, exits within the join timeout.
+# to stop and logs a terminal shutdown status, while the overall shutdown completes within the
+# allowed clock bound
 #
 name: "AgentGracefulShutdown"
 tests:

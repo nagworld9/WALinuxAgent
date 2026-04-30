@@ -319,6 +319,7 @@ class LogCollectorMonitorHandler(ThreadHandlerInterface):
     def signal_stop(self):
         # Flag the loop to exit on its next iteration; do not block waiting for the thread.
         self.should_run = False
+        self._signal_stop()
 
     def stop(self):
         self.signal_stop()
