@@ -977,41 +977,39 @@ class TestUpdate(UpdateTestCase):
 
     def test_shutdown_signals_in_parallel_before_joining(self):
         """
-        Verifies that Step 1 (signal_stop) is broadcast to every handler before Step 2 (join) begins.
-        This is what allows healthy threads to wind down concurrently rather than serializing each
-        handler's join timeout.
+        Verifies that Step 1 (signal_stop) is broadcast to every handler before Step 2 (stop/join)
+        begins. This is what allows healthy threads to wind down concurrently rather than
+        serializing each handler's join timeout.
         """
-        signal_times = {}
-        stop_times = {}
+        call_order = []
 
-        def make_handler(name, stop_delay):
+        def make_handler(name):
             handler = MagicMock()
             handler.get_thread_name.return_value = name
             handler.is_alive.return_value = False
-            handler.signal_stop.side_effect = lambda n=name: signal_times.__setitem__(n, time.time())
-            # Simulate a slow join in stop() so we can measure that all signal_stop() calls happened
-            # *before* we ever block on the first stop().
-            def _slow_stop(n=name, d=stop_delay):
-                stop_times[n] = time.time()
-                time.sleep(d)
-            handler.stop.side_effect = _slow_stop
+            handler.signal_stop.side_effect = lambda n=name: call_order.append("signal:" + n)
+            handler.stop.side_effect = lambda n=name: call_order.append("stop:" + n)
             return handler
 
-        slow = make_handler("SlowThread", stop_delay=0.3)
-        fast1 = make_handler("MonitorHandler", stop_delay=0.0)
-        fast2 = make_handler("EnvHandler", stop_delay=0.0)
-
-        # Place the slow handler first so that, if shutdown were sequential (signal+stop per handler),
-        # the other handlers' signal_stop() calls would only happen *after* the slow stop() finished.
-        self.update_handler._all_thread_handlers = [slow, fast1, fast2]
+        handlers = [make_handler("HandlerA"), make_handler("HandlerB"), make_handler("HandlerC")]
+        self.update_handler._all_thread_handlers = handlers
         self.update_handler._shutdown()
 
-        # Every signal_stop() must have happened before the first stop() began — that is the parallelism guarantee.
-        latest_signal = max(signal_times.values())
-        earliest_stop = min(stop_times.values())
-        self.assertLessEqual(latest_signal, earliest_stop,
-            "All signal_stop() calls must complete before any stop()/join begins; "
-            "signal_times={0}, stop_times={1}".format(signal_times, stop_times))
+        # Sanity check: every handler was both signaled and stopped exactly once.
+        self.assertEqual(
+            sorted(call_order),
+            sorted(["signal:HandlerA", "signal:HandlerB", "signal:HandlerC",
+                    "stop:HandlerA", "stop:HandlerB", "stop:HandlerC"]),
+            "Each handler should be signaled and stopped exactly once; got {0}".format(call_order))
+
+        # Parallelism guarantee: every signal_stop() must appear before the first stop() — i.e.
+        # the index of the last "signal:*" entry must be less than the index of the first "stop:*"
+        # entry. Otherwise shutdown is interleaving signal/stop per handler.
+        last_signal_index = max(i for i, tag in enumerate(call_order) if tag.startswith("signal:"))
+        first_stop_index = min(i for i, tag in enumerate(call_order) if tag.startswith("stop:"))
+        self.assertLess(
+            last_signal_index, first_stop_index,
+            "All signal_stop() calls must happen before any stop()/join begins; call_order={0}".format(call_order))
 
     def test_sigterm_handler_invokes_shutdown(self):
         """

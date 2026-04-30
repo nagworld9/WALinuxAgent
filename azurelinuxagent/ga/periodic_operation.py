@@ -16,7 +16,6 @@
 #
 
 import datetime
-import time
 
 from azurelinuxagent.common import logger
 from azurelinuxagent.common.future import ustr, UTC
@@ -70,8 +69,10 @@ class PeriodicOperation(object):
         Takes a list of operations, finds the operation that should be executed next (that with the closest next_run_time)
         and sleeps until it is time to execute that operation.
 
-        If a stop_event (threading.Event) is provided, the sleep will be interrupted when the event is set, allowing
-        the caller to wake up promptly during shutdown.
+        stop_event (threading.Event) is required: the sleep is implemented via stop_event.wait(), so setting the
+        event from another thread interrupts the sleep immediately. This is what allows handlers to wake up
+        promptly when shutdown is signaled instead of sleeping through the shutdown window. All call sites must
+        pass a valid threading.Event; passing None will raise AttributeError when wait() is invoked.
         """
         next_operation_time = min(op.next_run_time() for op in operations)
 

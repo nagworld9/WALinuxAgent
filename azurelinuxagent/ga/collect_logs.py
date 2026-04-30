@@ -305,6 +305,7 @@ class LogCollectorMonitorHandler(ThreadHandlerInterface):
         return LogCollectorMonitorHandler._THREAD_NAME
 
     def __init__(self, controllers):
+        super(LogCollectorMonitorHandler, self).__init__()
         self.event_thread = None
         self.should_run = True
         self.period = 2  # Log collector monitor runs every 2 secs.
@@ -315,8 +316,12 @@ class LogCollectorMonitorHandler(ThreadHandlerInterface):
     def run(self):
         self.start()
 
-    def stop(self):
+    def signal_stop(self):
+        # Flag the loop to exit on its next iteration; do not block waiting for the thread.
         self.should_run = False
+
+    def stop(self):
+        self.signal_stop()
         if self.is_alive():
             self.join()
 

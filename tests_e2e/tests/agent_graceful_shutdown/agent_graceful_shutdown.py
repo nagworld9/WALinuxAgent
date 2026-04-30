@@ -78,10 +78,14 @@ class AgentGracefulShutdown(AgentVmTest):
         ssh_client = self._context.create_ssh_client()
 
         # One-time setup: enable log collection so the CollectLogsHandler thread is started by the
-        # agent every time it comes up.
+        # agent every time it comes up. Also lower Debug.LogCollectorInitialDelay (default 5 minutes)
+        # so the collector exits its initial sleep quickly; otherwise an iteration that stops the
+        # agent before that delay elapses would not see the "Signaling CollectLogsHandler thread to
+        # stop" line because the thread would still be parked in the initial sleep.
         log.info("Enabling log collection so all threads run on every iteration...")
         ssh_client.run_command(
-            "sh -c 'agent-service stop && update-waagent-conf Logs.Collect=y'",
+            "sh -c 'agent-service stop && "
+            "update-waagent-conf Logs.Collect=y Debug.LogCollectorInitialDelay=5'",
             use_sudo=True,
         )
 

@@ -59,13 +59,14 @@ from azurelinuxagent.common.version import AGENT_LONG_NAME, AGENT_NAME, AGENT_DI
     has_logrotate, PY_VERSION_MAJOR, PY_VERSION_MINOR, PY_VERSION_MICRO, get_daemon_version
 from azurelinuxagent.ga.agent_update_handler import get_agent_update_handler
 from azurelinuxagent.ga.collect_logs import get_collect_logs_handler, is_log_collection_allowed
-from azurelinuxagent.ga.collect_telemetry_events import get_collect_telemetry_events_handler
+from azurelinuxagent.ga.collect_telemetry_events import get_collect_telemetry_events_handler, \
+    CollectTelemetryEventsHandler
 from azurelinuxagent.ga.env import get_env_handler
 from azurelinuxagent.ga.exthandlers import ExtHandlersHandler, list_agent_lib_directory, \
     ExtensionStatusValue, ExtHandlerStatusValue
 from azurelinuxagent.ga.guestagent import GuestAgent
 from azurelinuxagent.ga.monitor import get_monitor_handler
-from azurelinuxagent.ga.send_telemetry_events import get_send_telemetry_events_handler
+from azurelinuxagent.ga.send_telemetry_events import get_send_telemetry_events_handler, SendTelemetryEventsHandler
 from azurelinuxagent.ga.signing_certificate_util import write_signing_certificates, get_microsoft_signing_certificate_path
 from azurelinuxagent.ga.confidential_vm_info import ConfidentialVMInfo
 
@@ -345,13 +346,26 @@ class UpdateHandler(object):
                 # atomic: exactly one caller will get True; every other caller (a duplicate SIGTERM,
                 # whether from systemd, the daemon's forward_signal)
                 # will get False and return without entering the shutdown block below. We never release
-                # the lock because the winning handler ends with sys.exit(0).
+                # the lock because the winning handler always exits the process via sys.exit() in the
+                # finally block below.
                 if not self._shutdown_lock.acquire(False):
                     logger.info("SIGTERM handler already in progress for ext handler, ignoring duplicate signal")
                     return
                 logger.info("SIGTERM received for ext handler, shutting down gracefully...")
-                self._shutdown()
-                sys.exit(0)
+                # exit_code is 0 on a clean shutdown and 1 if _shutdown() raises. We must always
+                # reach sys.exit() in the finally block: if we let an exception propagate out of the
+                # signal handler, the process would remain alive while systemd expects it to terminate,
+                # and (because we never release self._shutdown_lock) any later SIGTERM would be
+                # silently ignored as a "duplicate", leaving the unit stuck.
+                exit_code = 0
+                try:
+                    self._shutdown()
+                except Exception as e:
+                    exit_code = 1
+                    logger.warn("SIGTERM shutdown for ext handler failed: {0}", ustr(e))
+                    logger.warn(textutil.format_exception(e))
+                finally:
+                    sys.exit(exit_code)
 
         signal.signal(signal.SIGTERM, handle_sigterm)
 
@@ -1107,8 +1121,8 @@ class UpdateHandler(object):
         #
         # All other thread handlers are independent of each other and can be stopped in any order; we stop them
         # after the telemetry pair.
-        ordered_thread_names = ["TelemetryEventsCollector", "SendTelemetryHandler"]
-        handlers_by_name = {h.get_thread_name(): h for h in self._all_thread_handlers}
+        ordered_thread_names = [CollectTelemetryEventsHandler.get_thread_name(), SendTelemetryEventsHandler.get_thread_name()]
+        handlers_by_name = dict((h.get_thread_name(), h) for h in self._all_thread_handlers)
 
         ordered_handlers = []
         for name in ordered_thread_names:
