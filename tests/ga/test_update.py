@@ -1002,7 +1002,7 @@ class TestUpdate(UpdateTestCase):
                     "stop:HandlerA", "stop:HandlerB", "stop:HandlerC"]),
             "Each handler should be signaled and stopped exactly once; got {0}".format(call_order))
 
-        # Parallelism guarantee: every signal_stop() must appear before the first stop() — i.e.
+        # Parallelism guarantee: every signal_stop() must appear before the first stop() -- i.e.
         # the index of the last "signal:*" entry must be less than the index of the first "stop:*"
         # entry. Otherwise shutdown is interleaving signal/stop per handler.
         last_signal_index = max(i for i, tag in enumerate(call_order) if tag.startswith("signal:"))
@@ -1034,7 +1034,7 @@ class TestUpdate(UpdateTestCase):
             return _signal.SIG_DFL
 
         # Keep _shutdown patched across both run() (which installs the handler) and the subsequent
-        # invocations of the captured handler — otherwise the mock would be reverted by the time
+        # invocations of the captured handler -- otherwise the mock would be reverted by the time
         # the handler is called and call_count would stay at 0.
         with patch.object(self.update_handler, "_shutdown") as mock_shutdown:
             with patch("azurelinuxagent.ga.update.signal.signal", side_effect=fake_signal):
