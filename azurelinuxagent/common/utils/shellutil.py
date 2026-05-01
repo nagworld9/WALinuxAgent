@@ -374,6 +374,9 @@ def run_command_get_output(command):
                 raise CommandError(command=__format_command(command), return_code=process.returncode,
                                    stdout="", stderr=command_stderr)
         finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
             _on_command_completed(process.pid)
     finally:
         stderr_file.close()
