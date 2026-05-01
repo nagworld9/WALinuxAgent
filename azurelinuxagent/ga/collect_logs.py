@@ -20,7 +20,6 @@ import datetime
 import os
 import sys
 import threading
-import time
 from azurelinuxagent.ga import logcollector, cgroupconfigurator
 
 import azurelinuxagent.common.conf as conf
@@ -353,7 +352,7 @@ class LogCollectorMonitorHandler(ThreadHandlerInterface):
                     logger.error("An error occurred in the log collection monitor thread loop; "
                                  "will skip the current iteration.\n{0}", ustr(e))
                 finally:
-                    time.sleep(self.period)
+                    self._interruptible_sleep(self.period)
         except Exception as e:
             logger.error(
                 "An error occurred in the MonitorLogCollectorCgroupsHandler thread; will exit the thread.\n{0}",
