@@ -371,11 +371,8 @@ def run_command_get_output(command):
             if process.returncode != 0:
                 stderr_file.seek(0)
                 command_stderr = __encode_command_output(stderr_file.read())
-                logger.error(
-                    "Command: [{0}], return code: [{1}], stderr: [{2}]",
-                    __format_command(command),
-                    process.returncode,
-                    command_stderr)
+                raise CommandError(command=__format_command(command), return_code=process.returncode,
+                                   stdout="", stderr=command_stderr)
         finally:
             _on_command_completed(process.pid)
     finally:

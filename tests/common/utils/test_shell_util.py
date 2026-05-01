@@ -486,15 +486,15 @@ class RunCommandGetOutputTestCase(AgentTestCase):
         output = list(shellutil.run_command_get_output(["true"]))
         self.assertEqual(output, [])
 
-    def test_run_command_get_output_should_log_error_on_non_zero_exit(self):
-        with patch("azurelinuxagent.common.utils.shellutil.logger.error") as mock_log_error:
+    def test_run_command_get_output_should_raise_command_error_on_non_zero_exit(self):
+        with self.assertRaises(shellutil.CommandError):
             list(shellutil.run_command_get_output(["ls", "nonexistent_file"]))
-            self.assertEqual(mock_log_error.call_count, 1)
 
-    def test_run_command_get_output_should_not_log_on_success(self):
-        with patch("azurelinuxagent.common.utils.shellutil.logger.error") as mock_log_error:
+    def test_run_command_get_output_should_not_raise_on_success(self):
+        try:
             list(shellutil.run_command_get_output(["echo", "hello"]))
-            self.assertEqual(mock_log_error.call_count, 0)
+        except shellutil.CommandError:
+            self.fail("run_command_get_output raised CommandError on success")
 
     def test_run_command_get_output_should_track_process(self):
         with patch("azurelinuxagent.common.utils.shellutil.subprocess.Popen", wraps=subprocess.Popen) as popen_patch:
