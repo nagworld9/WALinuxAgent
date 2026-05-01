@@ -96,6 +96,22 @@ class MonitorHandlerTestCase(AgentTestCase):
 
                                 self.assertEqual(invoked_operations, expected_operations, "The monitor thread did not invoke the expected operations")
 
+    def test_it_should_skip_kernel_soft_lockup_when_not_available(self):
+        def periodic_operation_run(self):
+            invoked_operations.append(self.__class__.__name__)
+
+        with _mock_wire_protocol():
+            with patch("azurelinuxagent.ga.monitor.MonitorHandler.stopped", side_effect=[False, True]):
+                with patch("time.sleep"):
+                    with patch.object(PeriodicOperation, "run", side_effect=periodic_operation_run, autospec=True):
+                        with patch("azurelinuxagent.ga.monitor.platform.system", return_value="Linux"):
+                            with patch.object(MonitorKernelSoftLockup, "_is_dmesg_available", return_value=False):
+                                invoked_operations = []
+                                monitor_handler = get_monitor_handler()
+                                monitor_handler.run()
+                                monitor_handler.join()
+                                self.assertNotIn(MonitorKernelSoftLockup.__name__, invoked_operations)
+
 
 class SendHostPluginHeartbeatOperationTestCase(AgentTestCase, HttpRequestPredicates):
     def test_it_should_report_host_ga_health(self):

@@ -16,6 +16,7 @@
 #
 
 import json
+import os
 
 from azurelinuxagent.common.event import WALAEventOperation
 from azurelinuxagent.ga.kernel_event_monitor import MonitorKernelSoftLockup
@@ -238,3 +239,31 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
             with patch("azurelinuxagent.ga.kernel_event_monitor.add_event") as mock_add_event:
                 monitor._operation()
                 self.assertEqual(len(self._get_soft_lockup_events(mock_add_event)), 0)
+
+    # -- _is_dmesg_available -------------------------------------------------
+
+    def test_is_dmesg_available_should_return_false_when_dmesg_not_found(self):
+        with patch("azurelinuxagent.ga.kernel_event_monitor.run_command", side_effect=Exception("not found")):
+            self.assertFalse(MonitorKernelSoftLockup._is_dmesg_available())
+
+    # -- _get_boot_id --------------------------------------------------------
+
+    def test_get_boot_id_should_return_unknown_on_failure(self):
+        with patch.object(MonitorKernelSoftLockup, "_BOOT_ID_PATH", "/nonexistent/boot_id"):
+            self.assertEqual(MonitorKernelSoftLockup._get_boot_id(), MonitorKernelSoftLockup._UNKNOWN_BOOT_ID)
+
+    # -- _save_state failure -------------------------------------------------
+
+    def test_save_state_should_log_warning_on_failure(self):
+        monitor = self._create_monitor()
+        monitor._state_file_path = os.path.join(self.tmp_dir, "no", "such", "dir", "state.json")
+        with patch("azurelinuxagent.ga.kernel_event_monitor.logger.warn") as mock_warn:
+            monitor._save_state()
+            self.assertIn("Failed to save state", mock_warn.call_args[0][0])
+
+    # -- _parse_and_aggregate_soft_lockup_events edge cases ------------------
+
+    def test_parse_should_skip_lines_without_timestamp(self):
+        monitor = self._create_monitor()
+        monitor._parse_and_aggregate_soft_lockup_events("no timestamp here")
+        self.assertEqual(len(monitor._event_aggregates), 0)
