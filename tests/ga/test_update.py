@@ -900,10 +900,21 @@ class TestUpdate(UpdateTestCase):
         self.assertFalse(os.path.isfile(self.update_handler._sentinel_file_path()))
 
     def test_shutdown_stops_all_threads(self):
-        # Create mock thread handlers and track the order in which signal_stop()/stop() are called.
-        # Note: we deliberately list the telemetry pair *before* the independent handlers in the input list,
-        # to verify that _shutdown() does not rely on input order and instead uses an explicit dependency
-        # ordering (TelemetryEventsCollector first, then SendTelemetryHandler, then the rest).
+        # Verifies the two-phase shutdown contract documented in UpdateHandler._shutdown():
+        #
+        #   Phase A (dependency-ordered handlers, sequential):
+        #       TelemetryEventsCollector is signaled and joined before SendTelemetryHandler is even signaled.
+        #       This protects the producer/consumer relationship between the two telemetry threads -- the
+        #       collector enqueues events into the sender's queue and would silently drop events (deleting
+        #       the event files in its finally block) if the sender were signaled while it was still
+        #       iterating.
+        #
+        #   Phase B (independent handlers, broadcast-then-join):
+        #       Every other handler is signaled to stop up-front, and only then are their joins awaited,
+        #       so their join timeouts overlap rather than serialize.
+        #
+        # We deliberately list the telemetry pair *before* the independent handlers in the input list, to
+        # verify that _shutdown() does not rely on input order and instead uses the explicit ordering above.
         call_order = []
         mock_handlers = []
         for name in ["SendTelemetryHandler", "TelemetryEventsCollector", "MonitorHandler", "EnvHandler"]:
@@ -917,26 +928,43 @@ class TestUpdate(UpdateTestCase):
         self.update_handler._all_thread_handlers = mock_handlers
         self.update_handler._shutdown()
 
-        # Verify signal_stop() and stop() were each called once on every handler
+        # Sanity: signal_stop() and stop() were each called once on every handler.
         for handler in mock_handlers:
             self.assertEqual(1, handler.signal_stop.call_count)
             self.assertEqual(1, handler.stop.call_count)
 
-        # Verify two-phase behavior: every signal_stop() must happen before any stop().
-        signal_indices = [i for i, (kind, _) in enumerate(call_order) if kind == "signal"]
-        stop_indices = [i for i, (kind, _) in enumerate(call_order) if kind == "stop"]
-        self.assertLess(max(signal_indices), min(stop_indices),
-            "All threads must be signaled to stop before we wait for any thread to finish")
+        # Phase A assertions: the telemetry pair is fully sequential.
+        # The expected prefix of call_order is:
+        #     [("signal", "TelemetryEventsCollector"), ("stop", "TelemetryEventsCollector"),
+        #      ("signal", "SendTelemetryHandler"),     ("stop", "SendTelemetryHandler"),
+        #      ...]
+        self.assertEqual(("signal", "TelemetryEventsCollector"), call_order[0],
+            "TelemetryEventsCollector must be the first thread signaled to stop")
+        self.assertEqual(("stop", "TelemetryEventsCollector"), call_order[1],
+            "TelemetryEventsCollector must be fully joined before SendTelemetryHandler is signaled, "
+            "otherwise the collector can hit ServiceStoppedError mid-iteration and silently drop telemetry")
+        self.assertEqual(("signal", "SendTelemetryHandler"), call_order[2],
+            "SendTelemetryHandler must be signaled only after TelemetryEventsCollector has stopped")
+        self.assertEqual(("stop", "SendTelemetryHandler"), call_order[3],
+            "SendTelemetryHandler must drain its queue and join before any independent handler is touched")
 
-        # Within the stop() phase, verify the explicit dependency order: collector first (so it stops
-        # enqueueing events), then sender (so it can drain its queue), then the remaining independent handlers.
-        stop_order = [name for kind, name in call_order if kind == "stop"]
-        self.assertEqual("TelemetryEventsCollector", stop_order[0],
-            "TelemetryEventsCollector must be stopped first so it stops producing events for SendTelemetryHandler")
-        self.assertEqual("SendTelemetryHandler", stop_order[1],
-            "SendTelemetryHandler must be stopped after TelemetryEventsCollector so it can drain remaining events")
-        # The remaining (independent) handlers may be stopped in any order
-        self.assertEqual(set(["MonitorHandler", "EnvHandler"]), set(stop_order[2:]))
+        # Phase B assertions: independent handlers are broadcast-signaled before any of them is joined.
+        independent_events = call_order[4:]
+        independent_signal_indices = [i for i, (kind, _) in enumerate(independent_events) if kind == "signal"]
+        independent_stop_indices = [i for i, (kind, _) in enumerate(independent_events) if kind == "stop"]
+        self.assertEqual(2, len(independent_signal_indices),
+            "Both independent handlers must be signaled to stop")
+        self.assertEqual(2, len(independent_stop_indices),
+            "Both independent handlers must be joined")
+        self.assertLess(max(independent_signal_indices), min(independent_stop_indices),
+            "All independent handlers must be signaled before any of them is joined, so their join "
+            "timeouts can overlap")
+
+        # The two independent handlers may be signaled/joined in either order.
+        self.assertEqual(set(["MonitorHandler", "EnvHandler"]),
+            set(name for kind, name in independent_events if kind == "signal"))
+        self.assertEqual(set(["MonitorHandler", "EnvHandler"]),
+            set(name for kind, name in independent_events if kind == "stop"))
 
         self.assertFalse(self.update_handler.is_running)
 

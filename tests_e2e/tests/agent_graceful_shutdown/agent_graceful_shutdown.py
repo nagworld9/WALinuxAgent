@@ -44,7 +44,6 @@ from typing import Any, Dict, List
 from assertpy import fail
 
 from tests_e2e.tests.agent_update.self_update import SelfUpdateBvt
-from tests_e2e.tests.lib.agent_test_context import AgentVmTestContext
 from tests_e2e.tests.lib.logging import log
 from tests_e2e.tests.lib.retry import retry_if_false
 
@@ -59,6 +58,11 @@ _ALWAYS_RUNNING_THREADS = [
 
 # Started only when log collection is enabled.
 _LOG_COLLECTOR_THREAD = "CollectLogsHandler"
+
+# Emitted by collect_logs.is_log_collection_allowed() during agent startup. The agent prints "[True]"
+# when all preconditions are met and the CollectLogsHandler thread will be started, "[False]" otherwise.
+# We use this to decide whether the collector is expected to appear in the shutdown sequence.
+_LOG_COLLECTION_ALLOWED_RE = re.compile(r"log collection is allowed at this time \[True]")
 
 # AgentUpgradeExitException reason produced by self_update_version_updater.proceed_with_update().
 # We use this as an anchor in the log to locate the AgentUpgrade-driven shutdown sequence.
@@ -76,21 +80,6 @@ class AgentGracefulShutdown(SelfUpdateBvt):
     Verifies the graceful-shutdown sequence emitted by UpdateHandler._shutdown() when the
     ext-handler exits via AgentUpgradeExitException (the self-update path).
     """
-
-    def __init__(self, context: AgentVmTestContext):
-        super().__init__(context)
-
-    def get_ignore_error_rules(self) -> List[Dict[str, Any]]:
-        # _shutdown() emits a WARNING when a thread does not exit within the join timeout. That is
-        # an expected outcome under load (the worker may be busy when the signal arrives) and the
-        # test treats it as a successful "did stop or timed out" result, so silence it in the log
-        # error scan.
-        return [
-            {
-                "message": r"\S+ thread did not stop within the timeout",
-                "if": lambda r: r.level == "WARNING",
-            },
-        ]
 
     def run(self):
         log.info("Setting up the VM with a custom older-version agent package...")
@@ -116,9 +105,9 @@ class AgentGracefulShutdown(SelfUpdateBvt):
         self._verify_agent_updated_to_latest_version()
 
         log.info("Verifying the graceful-shutdown sequence in /var/log/waagent.log...")
-        # The new agent restarts the log file rotation may not happen, so we just read the
-        # current waagent.log; the upgrade shutdown lines are appended before exit and remain
-        # in that file across the upgrade.
+        # The shutdown sequence is logged by the original (custom) agent process before it exits, and the
+        # new (latest) agent process appends to the same /var/log/waagent.log after it starts. So we just
+        # read the current file; the shutdown lines for the original process are still present in it.
         self._verify_shutdown_sequence()
 
     def _verify_shutdown_sequence(self) -> None:
@@ -167,11 +156,17 @@ class AgentGracefulShutdown(SelfUpdateBvt):
         # returns True at startup (controlled by configuration AND runtime preconditions like
         # cgroup support, supported python, etc.). We asked for it via configuration, but if the
         # runtime preconditions are not met the thread will not be started and will not appear in
-        # the shutdown sequence at all. To make the test robust across all distros, we treat the
-        # collector as expected only when we actually see it being signaled to stop.
+        # the shutdown sequence at all. So we look for the agent's startup log line
+        # "log collection is allowed at this time [True]" to decide whether it is expected.
         expected_threads = set(_ALWAYS_RUNNING_THREADS)
-        if _LOG_COLLECTOR_THREAD in signaled:
+        log_collection_allowed = any(_LOG_COLLECTION_ALLOWED_RE.search(line) for line in lines)
+        if log_collection_allowed:
             expected_threads.add(_LOG_COLLECTOR_THREAD)
+        else:
+            log.info(
+                "Log collection is not allowed on this VM (no 'log collection is allowed at this "
+                "time [True]' entry in waagent.log); CollectLogsHandler is not expected in the "
+                "shutdown sequence.")
 
         missing_signals = expected_threads - signaled
         missing_terminal = expected_threads - terminal
@@ -193,6 +188,18 @@ class AgentGracefulShutdown(SelfUpdateBvt):
 
         log.info("All expected threads were signaled and either stopped or timed out as expected.")
         return True
+
+    def get_ignore_error_rules(self) -> List[Dict[str, Any]]:
+        # _shutdown() emits a WARNING when a thread does not exit within the join timeout. That is
+        # an expected outcome under load (the worker may be busy when the signal arrives) and the
+        # test treats it as a successful "did stop or timed out" result, so silence it in the log
+        # error scan.
+        return [
+            {
+                "message": r"\S+ thread did not stop within the timeout",
+                "if": lambda r: r.level == "WARNING",
+            },
+        ]
 
 
 if __name__ == "__main__":
