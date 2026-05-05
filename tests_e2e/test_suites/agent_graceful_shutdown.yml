@@ -1,8 +1,9 @@
 #
-# This test validates that the ext-handler shuts down gracefully when SIGTERM is delivered to it
-# (e.g. by `systemctl stop`). It checks that every background thread the agent starts is signaled
-# to stop and logs a terminal shutdown status, while the overall shutdown completes within the
-# allowed clock bound
+# This test validates that the ext-handler shuts down gracefully on the natural exit paths
+# (AgentUpgradeExitException / ExitException) by triggering a self-update and then verifying
+# in waagent.log that:
+#   1. Every worker thread started by UpdateHandler.run() is signaled to stop
+#   2. Every worker thread either finishes cleanly or is reported as not stopping within the timeout
 #
 name: "AgentGracefulShutdown"
 tests:
@@ -10,7 +11,12 @@ tests:
 images:
   - "endorsed"
   - "endorsed-arm64"
+locations: "AzureCloud:eastus2euap"
+owns_vm: true
+skip_on_clouds:
+  - "AzureChinaCloud"
+  - "AzureUSGovernment"
+# Flatcar uses a read-only filesystem so we cannot rebuild the agent zip with a custom version.
 skip_on_images:
-  # Oracle 7.9 is excluded from this test, since the agent behaves differently when stopping and
-  # does not wait for the background threads to stop before exiting, which causes the test to fail.
-  - "oracle_79"
+  - "flatcar"
+  - "flatcar_arm64"

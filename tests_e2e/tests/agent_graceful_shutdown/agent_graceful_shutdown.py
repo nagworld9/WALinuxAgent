@@ -18,288 +18,181 @@
 #
 
 #
-# Validates that, when the agent service is stopped (SIGTERM), the ext-handler shuts down gracefully:
-#  * the SIGTERM handler logs that the signal was received
-#  * every background thread the ext-handler started is signaled to stop
-#  * every background thread reports it stopped successfully (i.e. the thread exited within the join timeout)
-#  * shutdown completes within a reasonable time
+# Validates that the ext-handler shuts down gracefully on the natural exit paths
+# (AgentUpgradeExitException / ExitException). The agent's UpdateHandler.run() loop catches these
+# exceptions, calls UpdateHandler._shutdown() and then sys.exit(0). _shutdown() must signal every
+# worker thread to stop and wait (with a bounded timeout) for each of them to finish.
 #
-# We stop and start the agent multiple times, waiting a random amount of time before each stop.
-# This way the threads are caught in different states (just started, running an operation, sleeping,
-# draining the telemetry queue, etc.) when the stop signal arrives. Each iteration checks its own
-# section of the agent log to confirm the shutdown happened correctly.
+# How the test works:
+#   1. We use the same self-update setup as the AgentUpdate suite: a custom older agent package is
+#      built, installed on the VM, and AutoUpdate.UpdateToLatestVersion=y is configured. The setup
+#      script also rotates /var/log/waagent.log so we capture only logs from this test run.
+#   2. We enable log collection (Logs.Collect=y) so the CollectLogsHandler thread is started in
+#      addition to the four threads always launched by run() (MonitorHandler, EnvHandler,
+#      SendTelemetryHandler, TelemetryEventsCollector).
+#   3. We wait for the agent to self-upgrade to the latest published version. The upgrade path
+#      raises AgentUpgradeExitException, which run() catches and which triggers _shutdown().
+#   4. We read /var/log/waagent.log and validate that, around the upgrade event, each worker
+#      thread has both a "Signaling X thread to stop..." line and a terminal line
+#      ("X thread stopped successfully" or "X thread did not stop within the timeout").
 #
 
-import random
 import re
-import time
 
 from typing import Any, Dict, List
 
 from assertpy import fail
 
-from tests_e2e.tests.lib.agent_test import AgentVmTest
+from tests_e2e.tests.agent_update.self_update import SelfUpdateBvt
+from tests_e2e.tests.lib.agent_test_context import AgentVmTestContext
 from tests_e2e.tests.lib.logging import log
-from tests_e2e.tests.lib.shell import CommandError
+from tests_e2e.tests.lib.retry import retry_if_false
 
 
-# Threads launched by UpdateHandler.run() that must shut down gracefully on SIGTERM.
-# Note: CollectLogsHandler is only started when log collection is enabled (Logs.Collect=y); we enable
-# it explicitly below so that all five threads are exercised by this test.
-_EXPECTED_THREADS = [
-    "TelemetryEventsCollector",
-    "SendTelemetryHandler",
+# Threads always started by UpdateHandler.run().
+_ALWAYS_RUNNING_THREADS = [
     "MonitorHandler",
     "EnvHandler",
-    "CollectLogsHandler",
+    "SendTelemetryHandler",
+    "TelemetryEventsCollector",
 ]
 
-# Maximum wall-clock time we allow the agent to take from receiving SIGTERM to all threads having
-# stopped. Each thread has a 5s join timeout; with five threads the worst-case serial join would be
-# 25s, but Phase-1 signal-broadcast lets healthy threads exit in parallel so total shutdown should be
-# well under this bound.
-_MAX_SHUTDOWN_SECONDS = 30
+# Started only when log collection is enabled.
+_LOG_COLLECTOR_THREAD = "CollectLogsHandler"
 
-# Number of stop/start iterations to run. More iterations give better coverage of the various thread
-# states (just-started, mid-operation, mid-sleep, queue-draining) at the cost of test runtime.
-_SHUTDOWN_ITERATIONS = 5
+# AgentUpgradeExitException reason produced by self_update_version_updater.proceed_with_update().
+# We use this as an anchor in the log to locate the AgentUpgrade-driven shutdown sequence.
+_UPGRADE_MARKER_RE = re.compile(
+    r"completed all update checks, exiting current process to upgrade to the new Agent version")
 
-# Range (in seconds) of the additional random delay we apply between confirming the agent is up and
-# issuing the stop. The lower bound is small enough to catch threads still in startup; the upper
-# bound spans more than one Goal State Period (default ~6s) so we also catch threads mid-iteration
-# and mid-sleep.
-_PRE_STOP_DELAY_RANGE = (1, 75)
+# Patterns emitted by UpdateHandler._shutdown(); see azurelinuxagent/ga/update.py.
+_SIGNAL_LINE_RE = re.compile(r"Signaling (\S+) thread to stop\.\.\.")
+_STOPPED_OK_RE = re.compile(r"(\S+) thread stopped successfully")
+_STOPPED_TIMEOUT_RE = re.compile(r"(\S+) thread did not stop within the timeout")
 
 
-class AgentGracefulShutdown(AgentVmTest):
+class AgentGracefulShutdown(SelfUpdateBvt):
     """
-    Tests that the ext-handler shuts down gracefully when SIGTERM is delivered (e.g. by `systemctl stop`).
+    Verifies the graceful-shutdown sequence emitted by UpdateHandler._shutdown() when the
+    ext-handler exits via AgentUpgradeExitException (the self-update path).
     """
 
-    def run(self):
-        ssh_client = self._context.create_ssh_client()
-
-        # One-time setup: enable log collection so the CollectLogsHandler thread is started by the
-        # agent every time it comes up. Also lower Debug.LogCollectorInitialDelay (default 5 minutes)
-        # so the collector exits its initial sleep quickly; otherwise an iteration that stops the
-        # agent before that delay elapses would not see the "Signaling CollectLogsHandler thread to
-        # stop" line because the thread would still be parked in the initial sleep.
-        log.info("Enabling log collection so all threads run on every iteration...")
-        ssh_client.run_command(
-            "sh -c 'agent-service stop && "
-            "update-waagent-conf Logs.Collect=y Debug.LogCollectorInitialDelay=5'",
-            use_sudo=True,
-        )
-
-        seed = int(time.time())
-        rng = random.Random(seed)
-        log.info("Random seed for this run: %d (use this to reproduce the delay sequence)", seed)
-
-        # Run several iterations. Each iteration:
-        #   1. rotates waagent.log so we always inspect a fresh slice
-        #   2. starts the agent and waits for it to be up
-        #   3. sleeps a random amount so the threads are caught in different states (startup,
-        #      mid-iteration, mid-sleep, queue-draining, etc.) when we issue the stop
-        #   4. stops the agent and validates the graceful-shutdown sequence in waagent.log
-        failures = []
-        for iteration in range(1, _SHUTDOWN_ITERATIONS + 1):
-            pre_stop_delay = rng.uniform(*_PRE_STOP_DELAY_RANGE)
-            log.info("")
-            log.info("===== Iteration %d / %d (pre-stop delay: %.2fs) =====",
-                     iteration, _SHUTDOWN_ITERATIONS, pre_stop_delay)
-            try:
-                self._run_one_iteration(ssh_client, pre_stop_delay)
-            except AssertionError as ex:
-                # assertpy.fail() raises AssertionError; collect them so we still surface every
-                # iteration's outcome rather than stopping at the first one.
-                failures.append("Iteration {0} (delay={1:.2f}s): {2}".format(iteration, pre_stop_delay, ex))
-                log.warning("Iteration %d failed: %s", iteration, ex)
-
-        # Restore the service so we leave the VM in a usable state for any subsequent tests.
-        log.info("Restoring agent service for subsequent tests...")
-        ssh_client.run_command("agent-service start", use_sudo=True)
-
-        if failures:
-            fail(
-                "Graceful shutdown validation failed in {0} of {1} iteration(s):\n".format(
-                    len(failures), _SHUTDOWN_ITERATIONS)
-                + "\n".join("    - " + f for f in failures))
-
-        log.info("All %d shutdown iterations completed successfully.", _SHUTDOWN_ITERATIONS)
-
-    def _run_one_iteration(self, ssh_client, pre_stop_delay):
-        """
-        Performs a single stop/start cycle and validates the shutdown sequence in waagent.log.
-
-        :param pre_stop_delay: how many seconds to wait between confirming the agent is up and
-                               sending the stop signal. A different value on each iteration causes
-                               the threads to be in different states when SIGTERM arrives.
-        """
-        # Rotate waagent.log so we only inspect log entries from this iteration.
-        log.info("Rotating waagent.log and starting the agent...")
-        ssh_client.run_command(
-            "sh -c 'agent-service stop || true; "
-            "mv /var/log/waagent.log /var/log/waagent.$(date --iso-8601=seconds).log 2>/dev/null || true; "
-            "agent-service start'",
-            use_sudo=True,
-        )
-
-        # Wait for the agent to come up. We use the 'Goal State Period:' line as a readiness marker
-        # because it is logged once after all background threads are launched.
-        log.info("Waiting for the agent to start all of its threads...")
-        for _ in range(30):
-            try:
-                ssh_client.run_command(
-                    "grep -q 'Goal State Period:' /var/log/waagent.log",
-                    use_sudo=True,
-                )
-                break
-            except CommandError:
-                time.sleep(2)
-        else:
-            fail("The agent did not finish starting up within 60 seconds of the service start")
-
-        # Add the randomized delay so this iteration catches the threads in a different state than
-        # the previous iteration did.
-        log.info("Letting the agent run for %.2fs before issuing stop...", pre_stop_delay)
-        time.sleep(pre_stop_delay)
-
-        # Trigger the graceful shutdown path. systemctl stop sends SIGTERM and waits for the unit to exit.
-        log.info("Stopping the agent service to trigger graceful shutdown...")
-        start_time = time.time()
-        ssh_client.run_command("agent-service stop", use_sudo=True)
-        elapsed = time.time() - start_time
-        log.info("agent-service stop returned in %.2fs", elapsed)
-
-        if elapsed > _MAX_SHUTDOWN_SECONDS:
-            fail(
-                "Agent shutdown took too long: {0:.2f}s (max allowed {1}s). The service may not "
-                "be tearing down threads in parallel.".format(elapsed, _MAX_SHUTDOWN_SECONDS))
-
-        # Pull the relevant log lines from the SIGTERM marker to the end of the shutdown sequence.
-        log.info("Inspecting waagent.log for the shutdown sequence...")
-        sigterm_marker = "SIGTERM received for ext handler, shutting down gracefully"
-        shutdown_log = ""
-        try:
-            shutdown_log = ssh_client.run_command(
-                "sed -n '/{0}/,$p' /var/log/waagent.log".format(sigterm_marker),
-                use_sudo=True,
-            ).rstrip()
-        except CommandError as e:
-            fail("Could not extract shutdown log lines from waagent.log: {0}".format(e))
-
-        if not shutdown_log:
-            fail(
-                "Did not find the SIGTERM marker '{0}' in waagent.log. The agent may have exited "
-                "without going through the graceful shutdown path.".format(sigterm_marker))
-
-        log.info("Shutdown log:\n%s", "\n".join("        " + ln for ln in shutdown_log.splitlines()))
-
-
-        # Checking if log collection is allowed at this time [True]...
-        # We use grep -F (fixed string) to avoid any regex interpretation of the brackets.
-        expected_threads = list(_EXPECTED_THREADS)
-        try:
-            ssh_client.run_command(
-                "grep -qF 'log collection is allowed at this time [True]' /var/log/waagent.log",
-                use_sudo=True,
-            )
-            log_collection_enabled = True
-        except CommandError:
-            log_collection_enabled = False
-        if not log_collection_enabled:
-            log.info(
-                "Log collection is not enabled on this VM (is_log_collection_allowed() returned "
-                "False); skipping CollectLogsHandler assertions for this iteration.")
-            expected_threads = [t for t in expected_threads if t != "CollectLogsHandler"]
-
-        # Per-thread validation. We deliberately do NOT fail when a single thread reports
-        # "did not stop within the timeout": the per-thread join timeout is only 5s, and a thread
-        # that is mid-operation (e.g. the log collector running systemd-run, the telemetry sender
-        # waiting on a network call) can occasionally exceed that and still finish cleanly. What
-        # actually matters for graceful shutdown is:
-        #   1. The agent signaled every expected thread to stop (so we know it didn't skip any).
-        #   2. Each thread reported a terminal status -- either "stopped successfully" OR
-        #      "did not stop within the timeout".
-        #   3. The whole agent-service stop call returned within _MAX_SHUTDOWN_SECONDS (asserted
-        #      above, before we even read the log).
-        # Iterations where every thread stopped cleanly within 5s are still the common case; we
-        # just stop treating the occasional 5s-overshoot as a hard failure.
-        missing = []
-        timed_out = []
-        for thread_name in expected_threads:
-            signal_re = r"Signaling {0} thread to stop".format(re.escape(thread_name))
-            stopped_re = r"{0} thread stopped successfully".format(re.escape(thread_name))
-            timed_out_re = r"{0} thread did not stop within the timeout".format(re.escape(thread_name))
-
-            if not re.search(signal_re, shutdown_log):
-                missing.append("{0} (no 'Signaling ... to stop' log)".format(thread_name))
-                continue
-
-            # A thread has a valid terminal status if EITHER it reported "stopped successfully"
-            # OR "did not stop within the timeout". Only when neither line appears do we treat it
-            # as missing -- that would mean _shutdown() didn't reach the per-thread stop step.
-            stopped_match = re.search(stopped_re, shutdown_log) is not None
-            timed_out_match = re.search(timed_out_re, shutdown_log) is not None
-            has_terminal_status = stopped_match or timed_out_match
-
-            if not has_terminal_status:
-                missing.append(
-                    "{0} (no terminal status: neither 'stopped successfully' nor "
-                    "'did not stop within the timeout')".format(thread_name))
-                continue
-
-            if timed_out_match:
-                # Track for diagnostic logging, but don't fail the iteration as long as the overall
-                # agent-service stop returned within _MAX_SHUTDOWN_SECONDS.
-                timed_out.append(thread_name)
-
-        if missing:
-            fail(
-                "The following threads did not complete their graceful shutdown sequence:\n"
-                + "\n".join("    - " + m for m in missing))
-
-        if timed_out:
-            log.info(
-                "The following threads exceeded the 5s per-thread join timeout but the overall "
-                "agent shutdown still completed within %.2fs (limit %ds): %s",
-                elapsed, _MAX_SHUTDOWN_SECONDS, ", ".join(timed_out))
-
-        # Verify the dependency ordering: TelemetryEventsCollector must be stopped before
-        # SendTelemetryHandler so that the collector cannot enqueue events into a queue whose owner
-        # has already exited. We only enforce this when both threads reported "stopped successfully"
-        # (i.e. we have stop-completion timestamps to compare). If either one timed out, the order
-        # check is skipped because the timed-out thread has no completion line.
-        collector_stopped_match = re.search(
-            r"TelemetryEventsCollector thread stopped successfully", shutdown_log)
-        sender_stopped_match = re.search(
-            r"SendTelemetryHandler thread stopped successfully", shutdown_log)
-        if collector_stopped_match and sender_stopped_match \
-                and collector_stopped_match.start() > sender_stopped_match.start():
-            fail(
-                "TelemetryEventsCollector stopped after SendTelemetryHandler; the dependency order "
-                "is wrong (the collector produces events into the sender's queue and must stop first).")
-
-        if timed_out:
-            log.info(
-                "Graceful shutdown completed in %.2fs; %d/%d thread(s) stopped within the per-thread "
-                "join timeout, %d exceeded it but the overall shutdown was still within bounds.",
-                elapsed, len(expected_threads) - len(timed_out), len(expected_threads), len(timed_out))
-        else:
-            log.info(
-                "Graceful shutdown completed in %.2fs and all %d threads stopped successfully.",
-                elapsed, len(expected_threads))
+    def __init__(self, context: AgentVmTestContext):
+        super().__init__(context)
 
     def get_ignore_error_rules(self) -> List[Dict[str, Any]]:
-        # The test deliberately stresses the per-thread join timeout (5s) by stopping the agent at
-        # random points -- including when the log collector is mid systemd-run, the telemetry sender
-        # is mid network call, etc. Threads that overshoot the per-thread join still finish cleanly
-        # well within the overall _MAX_SHUTDOWN_SECONDS bound (which is enforced separately above),
-        # so the resulting "thread did not stop within the timeout" warning is expected and should
-        # not be flagged as a detected error by the agent-log scanner.
+        # _shutdown() emits a WARNING when a thread does not exit within the join timeout. That is
+        # an expected outcome under load (the worker may be busy when the signal arrives) and the
+        # test treats it as a successful "did stop or timed out" result, so silence it in the log
+        # error scan.
         return [
-            {'message': r"\w+ thread did not stop within the timeout"},
+            {
+                "message": r"\S+ thread did not stop within the timeout",
+                "if": lambda r: r.level == "WARNING",
+            },
         ]
+
+    def run(self):
+        log.info("Setting up the VM with a custom older-version agent package...")
+        # _test_setup() is provided by SelfUpdateBvt. It rotates /var/log/waagent.log, installs
+        # the custom older-version pkg, and configures AutoUpdate.UpdateToLatestVersion=y so the
+        # agent will self-upgrade on the next iteration.
+        self._test_setup()
+
+        log.info("Enabling log collection so the CollectLogsHandler thread is started...")
+        # Reduce the initial delay so the log collector thread has time to start before the
+        # self-upgrade fires. 60s is the smallest value that still allows a single collection
+        # cycle if the agent runs long enough; if it does not, we still validate the four threads
+        # that are always started by run().
+        self._ssh_client.run_command(
+            "update-waagent-conf Logs.Collect=y Debug.LogCollectorInitialDelay=60",
+            use_sudo=True)
+
+        log.info("Waiting for the agent to self-upgrade to the latest published version...")
+        # _verify_agent_updated_to_latest_version() polls waagent --version until the running
+        # agent matches the latest version on the manifest. This is what guarantees that the
+        # AgentUpgradeExitException path was taken on the original (custom) agent process and
+        # therefore _shutdown() has run.
+        self._verify_agent_updated_to_latest_version()
+
+        log.info("Verifying the graceful-shutdown sequence in /var/log/waagent.log...")
+        # The new agent restarts the log file rotation may not happen, so we just read the
+        # current waagent.log; the upgrade shutdown lines are appended before exit and remain
+        # in that file across the upgrade.
+        self._verify_shutdown_sequence()
+
+    def _verify_shutdown_sequence(self) -> None:
+        # Allow a short retry window in case the upgrade marker has not been flushed yet.
+        success = retry_if_false(self._check_shutdown_sequence, attempts=5, delay=15)
+        if not success:
+            fail("Did not find the expected graceful-shutdown sequence in /var/log/waagent.log "
+                 "after the agent self-upgraded. See the logs above for details.")
+
+    def _check_shutdown_sequence(self) -> bool:
+        # Read the current waagent.log via SSH. The setup script rotates the log, so this file
+        # only contains log lines from after the test setup ran.
+        contents = self._ssh_client.run_command("cat /var/log/waagent.log", use_sudo=True)
+        lines = contents.splitlines()
+
+        # Find the AgentUpgrade marker; if it is not yet present the upgrade has not started.
+        upgrade_indices = [i for i, line in enumerate(lines) if _UPGRADE_MARKER_RE.search(line)]
+        if not upgrade_indices:
+            log.info("AgentUpgrade marker not found yet in waagent.log; will retry.")
+            return False
+
+        # Take the slice of the log starting from the upgrade marker. The shutdown sequence is
+        # emitted between this marker and the call to sys.exit(0), so anything after the marker
+        # (and before the next agent process starts logging) is the shutdown.
+        shutdown_section = lines[upgrade_indices[0]:]
+
+        signaled = set()
+        terminal = set()  # threads that either stopped successfully or were reported as timed out
+        for line in shutdown_section:
+            m = _SIGNAL_LINE_RE.search(line)
+            if m:
+                signaled.add(m.group(1))
+                continue
+            m = _STOPPED_OK_RE.search(line)
+            if m:
+                terminal.add(m.group(1))
+                continue
+            m = _STOPPED_TIMEOUT_RE.search(line)
+            if m:
+                terminal.add(m.group(1))
+                continue
+
+        # Decide which threads we expect in the shutdown sequence. The four threads in
+        # _ALWAYS_RUNNING_THREADS are launched unconditionally by UpdateHandler.run(), so we
+        # always require them. CollectLogsHandler is launched only when is_log_collection_allowed()
+        # returns True at startup (controlled by configuration AND runtime preconditions like
+        # cgroup support, supported python, etc.). We asked for it via configuration, but if the
+        # runtime preconditions are not met the thread will not be started and will not appear in
+        # the shutdown sequence at all. To make the test robust across all distros, we treat the
+        # collector as expected only when we actually see it being signaled to stop.
+        expected_threads = set(_ALWAYS_RUNNING_THREADS)
+        if _LOG_COLLECTOR_THREAD in signaled:
+            expected_threads.add(_LOG_COLLECTOR_THREAD)
+
+        missing_signals = expected_threads - signaled
+        missing_terminal = expected_threads - terminal
+
+        log.info(
+            "Graceful-shutdown sequence:\n"
+            "    expected threads      : %s\n"
+            "    signaled to stop      : %s\n"
+            "    stopped or timed out  : %s",
+            sorted(expected_threads), sorted(signaled), sorted(terminal))
+
+        if missing_signals:
+            log.info("Missing 'Signaling ... to stop' entries for: %s", sorted(missing_signals))
+            return False
+        if missing_terminal:
+            log.info("Missing terminal ('stopped successfully' or 'did not stop within the timeout') "
+                     "entries for: %s", sorted(missing_terminal))
+            return False
+
+        log.info("All expected threads were signaled and either stopped or timed out as expected.")
+        return True
 
 
 if __name__ == "__main__":

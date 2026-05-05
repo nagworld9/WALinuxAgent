@@ -26,7 +26,6 @@ import signal
 import stat
 import subprocess
 import sys
-import threading
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -183,10 +182,6 @@ class UpdateHandler(object):
         # List of thread handlers managed by this UpdateHandler; populated in run() and used during shutdown
         self._all_thread_handlers = []
 
-        # Mutual-exclusion lock used by the SIGTERM handler. Only the first SIGTERM that successfully
-        # acquires this lock is allowed to enter the shutdown block; every subsequent invocation of the
-        # handler will fail to acquire it and return immediately.
-        self._shutdown_lock = threading.Lock()
 
         if not conf.get_extensions_enabled():
             self._goal_state_period = GOAL_STATE_PERIOD_EXTENSIONS_DISABLED
@@ -339,35 +334,6 @@ class UpdateHandler(object):
         """
         This is the main loop which watches for agent and extension updates.
         """
-
-        def handle_sigterm(signum, _frame):
-            if signum == signal.SIGTERM:
-                # Take ownership of the shutdown sequence. acquire(False) is non-blocking and
-                # atomic: exactly one caller will get True; every other caller (a duplicate SIGTERM,
-                # whether from systemd, the daemon's forward_signal)
-                # will get False and return without entering the shutdown block below. We never release
-                # the lock because the winning handler always exits the process via sys.exit() in the
-                # finally block below.
-                if not self._shutdown_lock.acquire(False):
-                    logger.info("SIGTERM handler already in progress for ext handler, ignoring duplicate signal")
-                    return
-                logger.info("SIGTERM received for ext handler, shutting down gracefully...")
-                # exit_code is 0 on a clean shutdown and 1 if _shutdown() raises. We must always
-                # reach sys.exit() in the finally block: if we let an exception propagate out of the
-                # signal handler, the process would remain alive while systemd expects it to terminate,
-                # and (because we never release self._shutdown_lock) any later SIGTERM would be
-                # silently ignored as a "duplicate", leaving the unit stuck.
-                exit_code = 0
-                try:
-                    self._shutdown()
-                except Exception as e:
-                    exit_code = 1
-                    logger.warn("SIGTERM shutdown for ext handler failed: {0}", ustr(e))
-                    logger.warn(textutil.format_exception(e))
-                finally:
-                    sys.exit(exit_code)
-
-        signal.signal(signal.SIGTERM, handle_sigterm)
 
         try:
             logger.info("{0} (Goal State Agent version {1})", AGENT_LONG_NAME, AGENT_VERSION)
@@ -1107,8 +1073,9 @@ class UpdateHandler(object):
         return os.path.join(conf.get_lib_dir(), INITIAL_GOAL_STATE_FILE)
 
     def _shutdown(self):
-        # _shutdown() runs in two different processes when SIGTERM is delivered (the daemon process and
-        # the ext-handler child process), so we need to be careful about race conditions in this code block.
+        # _shutdown() is invoked when the ext-handler exits its main loop (normal completion or
+        # ExitException paths) and from the daemon's forward_signal() when the daemon receives
+        # SIGTERM. It is responsible for stopping all worker threads started by run().
         self.is_running = False
 
         # Build an explicit shutdown order so we don't rely on the order of items in self._all_thread_handlers.

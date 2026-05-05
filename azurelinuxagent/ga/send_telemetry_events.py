@@ -70,6 +70,7 @@ class SendTelemetryEventsHandler(ThreadHandlerInterface):
         return self._thread is not None and self._thread.is_alive()
 
     def start(self):
+        self._reset_stop_event()
         self._thread = threading.Thread(target=self._process_telemetry_thread)
         self._thread.daemon = True
         self._thread.name = self.get_thread_name()

@@ -1011,68 +1011,6 @@ class TestUpdate(UpdateTestCase):
             last_signal_index, first_stop_index,
             "All signal_stop() calls must happen before any stop()/join begins; call_order={0}".format(call_order))
 
-    def test_sigterm_handler_invokes_shutdown(self):
-        """
-        Validates the SIGTERM path: capture the handler installed by run(), invoke it as
-        the signal subsystem would, and verify it triggers _shutdown() with the duplicate-signal guard
-        working correctly. We patch signal.signal to capture the handler and immediately raise
-        ExitException so run() unwinds without going through the rest of its initialization.
-        """
-        import signal as _signal
-
-        captured = {}
-
-        class _BailOut(Exception):
-            pass
-
-        def fake_signal(signum, handler):
-            if signum == _signal.SIGTERM:
-                captured["handler"] = handler
-                # Exit run() immediately after the handler is installed; any exception from run()'s
-                # initialization is logged and swallowed by run(), so we wrap with a try/except below.
-                raise _BailOut("captured handler; bailing out of run()")
-            return _signal.SIG_DFL
-
-        # Keep _shutdown patched across both run() (which installs the handler) and the subsequent
-        # invocations of the captured handler -- otherwise the mock would be reverted by the time
-        # the handler is called and call_count would stay at 0.
-        with patch.object(self.update_handler, "_shutdown") as mock_shutdown:
-            with patch("azurelinuxagent.ga.update.signal.signal", side_effect=fake_signal):
-                with patch("sys.exit"):
-                    try:
-                        self.update_handler.run()
-                    except _BailOut:
-                        pass
-
-            # The SIGTERM handler should have been installed
-            self.assertIn("handler", captured, "run() did not install a SIGTERM handler")
-            sigterm_handler = captured["handler"]
-            self.assertTrue(callable(sigterm_handler))
-
-            # First invocation triggers _shutdown()
-            with patch("sys.exit") as mock_exit:
-                sigterm_handler(_signal.SIGTERM, None)
-            self.assertEqual(1, mock_shutdown.call_count,
-                "First SIGTERM should trigger _shutdown()")
-            self.assertEqual(1, mock_exit.call_count,
-                "First SIGTERM should call sys.exit(0)")
-
-            # Duplicate SIGTERM must be ignored
-            with patch("sys.exit") as mock_exit_again:
-                sigterm_handler(_signal.SIGTERM, None)
-            self.assertEqual(1, mock_shutdown.call_count,
-                "Duplicate SIGTERM should NOT trigger _shutdown() again")
-            self.assertEqual(0, mock_exit_again.call_count,
-                "Duplicate SIGTERM should NOT call sys.exit again")
-
-            # Non-SIGTERM signals must be ignored entirely (the handler is only installed for SIGTERM,
-            # but defensively check that an unrelated signum is a no-op).
-            with patch("sys.exit") as mock_exit_other:
-                sigterm_handler(_signal.SIGINT, None)
-            self.assertEqual(1, mock_shutdown.call_count,
-                "Non-SIGTERM signal should not trigger _shutdown()")
-            self.assertEqual(0, mock_exit_other.call_count,
-                "Non-SIGTERM signal should not call sys.exit")
 
     def test_shutdown_ignores_missing_sentinel_file(self):
         self.assertFalse(os.path.isfile(self.update_handler._sentinel_file_path()))
