@@ -355,17 +355,22 @@ def run_pipe(pipe, stdin=None, stdout=subprocess.PIPE, stderr=subprocess.PIPE, l
     return __run_command(command_action=command_action, command=pipe, log_error=log_error, encode_output=encode_output)
 
 
-def run_command_get_output(command):
+def run_command_get_output(command, on_output_line):
     """
-    Executes the given command and yields stdout lines as strings.
-    Processes stdout line-by-line rather than buffering the entire output.
+    Executes the given command and calls on_output_line(line) for each stdout line.
+
+    The command's stdout is processed line-by-line rather than buffering the entire output.
+    Raises CommandError on non-zero exit code.
+
+    If the callback raises an exception, the subprocess is killed and cleaned up
+    before re-raising.
     """
     stderr_file = tempfile.TemporaryFile()
     try:
         process = _popen(command, stdout=subprocess.PIPE, stderr=stderr_file, shell=False)
         try:
             for line in process.stdout:
-                yield __encode_command_output(line).rstrip('\n')
+                on_output_line(__encode_command_output(line).rstrip('\n'))
 
             process.wait()
             if process.returncode != 0:
@@ -373,10 +378,16 @@ def run_command_get_output(command):
                 command_stderr = __encode_command_output(stderr_file.read())
                 raise CommandError(command=__format_command(command), return_code=process.returncode,
                                    stdout="", stderr=command_stderr)
-        finally:
+        except Exception:
             if process.poll() is None:
-                process.kill()
+                try:
+                    process.kill()
+                except OSError:
+                    pass  # process may have exited between poll() and kill()
                 process.wait()
+            raise
+        finally:
+            process.stdout.close()
             _on_command_completed(process.pid)
     finally:
         stderr_file.close()

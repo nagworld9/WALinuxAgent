@@ -179,8 +179,7 @@ class MonitorKernelSoftLockup(PeriodicOperation):
         Stream dmesg output line by line and parse soft lockup events.
         """
         try:
-            for line in run_command_get_output(['dmesg']):
-                self._parse_and_aggregate_soft_lockup_events(line)
+            run_command_get_output(['dmesg'], on_output_line=self._parse_and_aggregate_soft_lockup_events)
         except Exception as e:
             logger.warn("KernelSoftLockup: Failed to read dmesg output: {0}".format(ustr(e)))
 
