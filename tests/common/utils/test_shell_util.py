@@ -513,17 +513,24 @@ class RunCommandGetOutputTestCase(AgentTestCase):
 
     def test_run_command_get_output_should_kill_process_when_callback_raises(self):
         """When the callback raises an exception, the subprocess should be killed and cleaned up."""
+        pids = []
+        original_popen = shellutil._popen
+
+        def capture_popen(*args, **kwargs):
+            proc = original_popen(*args, **kwargs)
+            pids.append(proc.pid)
+            return proc
+
         def raise_on_callback(_):
             raise RuntimeError("stop")
 
-        with self.assertRaises(RuntimeError,
-                               msg="The callback exception should propagate to the caller"):
-            shellutil.run_command_get_output(["bash", "-c", "echo line1; read"], on_output_line=raise_on_callback)
+        with patch("azurelinuxagent.common.utils.shellutil._popen", side_effect=capture_popen):
+            with self.assertRaises(RuntimeError,
+                                   msg="The callback exception should propagate to the caller"):
+                shellutil.run_command_get_output(["bash", "-c", "echo line1; read"], on_output_line=raise_on_callback)
 
-        # After the exception, the process should have been killed and reaped.
-        self.assertEqual(
-            shellutil.get_running_commands(), [],
-            "Process should be removed from running commands after callback raises")
+        self.assertNotIn(pids[0], shellutil.get_running_commands(),
+                         "Process should be removed from running commands after callback raises")
 
 
 if __name__ == '__main__':
