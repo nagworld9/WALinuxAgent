@@ -223,7 +223,7 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
             "[12345.123456] BUG: soft lockup - CPU#0 stuck for 22s! [kworker/0:1:1234]"
         ]
 
-        def fake_run_command_get_output(command, on_output_line):
+        def fake_run_command_get_output(_command, on_output_line):
             for line in dmesg_lines:
                 on_output_line(line)
 
