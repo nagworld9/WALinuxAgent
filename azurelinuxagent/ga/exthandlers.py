@@ -58,8 +58,8 @@ from azurelinuxagent.common.utils import textutil
 from azurelinuxagent.common.utils.archive import ARCHIVE_DIRECTORY_NAME
 from azurelinuxagent.common.utils.flexible_version import FlexibleVersion
 from azurelinuxagent.common.version import AGENT_NAME, CURRENT_VERSION
-from azurelinuxagent.ga.signature_validation_util import validate_handler_manifest_signing_info, SignatureValidationError, \
-    PackageValidationError, ManifestValidationError, signature_validation_enabled, validate_signature, \
+from azurelinuxagent.ga.signature_validation_util import validate_extension_manifest_signing_info, SignatureValidationError, \
+    PackageValidationError, ManifestValidationError, ext_signature_validation_enabled, validate_signature, \
     cleanup_package_with_invalid_signature, report_validation_event, SignatureValidationTimeoutError, SignatureValidationTimeout
 
 _HANDLER_NAME_PATTERN = r'^([^-]+)'
@@ -827,7 +827,7 @@ class ExtHandlersHandler(object):
             extension_is_signed = ext_handler_i.ext_handler.encoded_signature != ""
             self._policy_engine.check_extension_policy(ext_handler_i.ext_handler.name, extension_is_signed)
 
-            self.__setup_new_handler(ext_handler_i, extension, self.__should_ignore_signature_validation_errors(ext_handler_i))
+            self.__setup_new_handler(ext_handler_i, extension, self.__should_ignore_ext_signature_validation_errors(ext_handler_i))
 
             if old_ext_handler_i is None:
                 ext_handler_i.install(extension=extension)
@@ -1172,17 +1172,17 @@ class ExtHandlersHandler(object):
 
         vm_status.vmAgent.extensionHandlers.extend(ext_handler_statuses)
 
-    def __should_ignore_signature_validation_errors(self, ext_handler_i):
+    def __should_ignore_ext_signature_validation_errors(self, ext_handler_i):
         """
-        Determine whether to ignore signature validation errors.
-        Signature validation errors are ignored only if:
-            1. The configuration flag "Debug.IgnoreSignatureValidationError" is set to True, AND
+        Determine whether to ignore extension signature validation errors.
+        Extension signature validation errors are ignored only if:
+            1. The configuration flag "Debug.IgnoreExtSignatureValidationErrors" is set to True, AND
             2. The policy does NOT require signature validation for this extension.
 \
         TODO: After telemetry release, remove condition #2 so that signature validation errors will block the
         extension regardless of policy.
         """
-        return conf.get_ignore_signature_validation_errors() and not self._policy_engine.should_enforce_signature_validation(ext_handler_i.ext_handler.name)
+        return conf.get_ignore_ext_signature_validation_errors() and not self._policy_engine.should_enforce_signature_validation(ext_handler_i.ext_handler.name)
 
 
 class ExtHandlerInstance(object):
@@ -1445,9 +1445,9 @@ class ExtHandlerInstance(object):
         if isinstance(ex, SignatureValidationTimeoutError):
             # TODO: This is temporary behavior for the telemetry release. For production release, remove this
             # if-block so timeout is treated like any other signature validation failure (extension should fail).
-            SignatureValidationTimeout.disable_validation()
+            SignatureValidationTimeout.disable_ext_validation()
             report_validation_event(op=WALAEventOperation.SignatureValidation, level=logger.LogLevel.WARNING,
-                                    message="Signature validation timeout exceeded. Disabling signature validation until agent restart.",
+                                    message="Extension signature validation timeout exceeded. Disabling extension signature validation until agent restart.",
                                     name=self.ext_handler.name, version=self.ext_handler.version, duration=0)
         report_validation_event(op=ex.operation, level=logger.LogLevel.WARNING, message=ustr(ex),
                                 name=self.ext_handler.name, version=self.ext_handler.version, duration=ex.duration)
@@ -1470,7 +1470,7 @@ class ExtHandlerInstance(object):
 
         package_file = os.path.join(conf.get_lib_dir(), self.get_extension_package_zipfile_name())
 
-        should_validate_ext_signature = signature_validation_enabled() and self.ext_handler.encoded_signature != ""
+        should_validate_ext_signature = ext_signature_validation_enabled() and self.ext_handler.encoded_signature != ""
         signature_validation_succeeded = False
 
         # Handle case where extension zip package already exists, but has not been extracted. If signature is present,
@@ -1506,7 +1506,7 @@ class ExtHandlerInstance(object):
             is_fast_track_goal_state = self.protocol.get_goal_state().extensions_goal_state.source == GoalStateSource.FastTrack
 
             try:
-                if signature_validation_enabled() and self.ext_handler.encoded_signature == "":
+                if ext_signature_validation_enabled() and self.ext_handler.encoded_signature == "":
                     # Extension signature status is already reported in telemetry during goal state processing, so here,
                     # we log locally only for debugging purposes if extension is unsigned.
                     # Note: If policy requires signature, an error would have been raised earlier for an unsigned extension.
@@ -1536,13 +1536,13 @@ class ExtHandlerInstance(object):
         # Validate 'signingInfo' - the publisher, type, and version specified in handler manifest 'signingInfo' should match the extension
         if should_validate_ext_signature:
             try:
-                validate_handler_manifest_signing_info(self.load_manifest(), self.ext_handler)
+                validate_extension_manifest_signing_info(self.load_manifest(), self.ext_handler)
                 # If both manifest and signature were validated successfully, update self._signature_validated. This
                 # attribute will be saved to the HandlerStatus file during status reporting.
                 self._signature_validated = signature_validation_succeeded
 
             except ManifestValidationError as ex:
-                # validate_handler_manifest_signing_info() raises only ManifestValidationError.
+                # validate_extension_manifest_signing_info() raises only ManifestValidationError.
                 if not ignore_signature_validation_errors:
                     raise
                 report_validation_event(op=ex.operation, level=logger.LogLevel.WARNING, message=ustr(ex), name=self.ext_handler.name,
@@ -2575,6 +2575,11 @@ class HandlerManifest(object):
 
     def get_resource_limits(self):
         return ResourceLimits(self.data.get('resourceLimits', None))
+
+    def get_signing_info(self):
+        # Returns the 'signingInfo' dict from the manifest, or None if not present. The 'signingInfo' section is only
+        # included in signed packages, so callers must handle the None case.
+        return self.data.get('signingInfo', None)
 
     def report_invalid_boolean_properties(self, ext_name):
         """

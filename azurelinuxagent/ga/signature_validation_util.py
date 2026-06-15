@@ -20,6 +20,7 @@ import base64
 import datetime
 import os
 import re
+import uuid
 
 from azurelinuxagent.common import conf
 from azurelinuxagent.common.utils.shellutil import run_command, CommandError
@@ -29,8 +30,8 @@ from azurelinuxagent.ga.signing_certificate_util import get_microsoft_signing_ce
 from azurelinuxagent.common.utils.flexible_version import FlexibleVersion
 from azurelinuxagent.common.future import ustr, UTC, datetime_min_utc
 from azurelinuxagent.common.event import add_event, WALAEventOperation, elapsed_milliseconds
-from azurelinuxagent.common.version import AGENT_VERSION, AGENT_NAME
-from azurelinuxagent.ga.cgroupconfigurator import CGroupConfigurator, EXT_SIGNATURE_VALIDATION_CPU_QUOTA, EXT_SIGNATURE_VALIDATION_SLICE_NAME, EXT_SIGNATURE_VALIDATION_CGROUPS_UNIT_NAME, DisableCgroups
+from azurelinuxagent.common.version import AGENT_VERSION, AGENT_NAME, AGENT_SIGNING_INFO_NAME
+from azurelinuxagent.ga.cgroupconfigurator import CGroupConfigurator, PKG_SIGNATURE_VALIDATION_CPU_QUOTA, PKG_SIGNATURE_VALIDATION_SLICE_NAME, PKG_SIGNATURE_VALIDATION_CGROUPS_UNIT_NAME, DisableCgroups
 from azurelinuxagent.common.osutil.systemd import is_systemd_run_failure
 from azurelinuxagent.ga.confidential_vm_info import ConfidentialVMInfo
 
@@ -46,20 +47,37 @@ _agent_start_time = datetime.datetime.now(UTC)
 
 class SignatureValidationTimeout(object):
     """
-    Tracks whether signature validation should be disabled due to a timeout. Disabling validation should only be done when the
-    customer has not opted into enforcement of extension signature validation.
+    Tracks whether signature validation should be disabled due to a timeout. 
+    
+    A timeout during extension signature validation should not disable validation for agent signature validation, 
+    and vice versa. This is because extension packages are typically larger than agent packages, and are more likely 
+    to experience timeouts. 
+    
+    Disabling extension signature validation should only be done when the customer has not opted into enforcement
+    of extension signature validation.
+
     TODO: This is a temporary workaround to prevent performance impact during telemetry release; remove for production release.
     """
     # Should only be set to True when customer has not opted into extension signature validation enforcement.
-    _validation_disabled = False
+    _ext_validation_disabled = False
+
+    _agent_validation_disabled = False
 
     @staticmethod
-    def is_validation_disabled():
-        return SignatureValidationTimeout._validation_disabled
+    def is_ext_validation_disabled():
+        return SignatureValidationTimeout._ext_validation_disabled
 
     @staticmethod
-    def disable_validation():
-        SignatureValidationTimeout._validation_disabled = True
+    def disable_ext_validation():
+        SignatureValidationTimeout._ext_validation_disabled = True
+
+    @staticmethod
+    def is_agent_validation_disabled():
+        return SignatureValidationTimeout._agent_validation_disabled
+
+    @staticmethod
+    def disable_agent_validation():
+        SignatureValidationTimeout._agent_validation_disabled = True
 
 
 class PackageValidationError(AgentError):
@@ -116,6 +134,27 @@ def _get_openssl_version():
         return "0.0.0"
 
 
+class _OpenSSLVersionCheck(object):
+    """
+    Caches the result of the OpenSSL version capability check performed by
+    openssl_version_supported_for_signature_validation(). Caching avoids repeated subprocess calls, 
+    log noise, and repeated telemetry events.
+
+    TODO: This is a temporary workaround while we collect telemetry on the signature validation feature; remove for
+    production release once enforcement is in place.
+    """
+    # None until first check; True/False thereafter.
+    _version_supports_validation = None
+
+    @staticmethod
+    def get_version_supports_validation():
+        return _OpenSSLVersionCheck._version_supports_validation
+
+    @staticmethod
+    def set_version_supports_validation(supported):
+        _OpenSSLVersionCheck._version_supports_validation = supported
+
+
 def openssl_version_supported_for_signature_validation():
     # Signature validation currently requires OpenSSL >= 1.1.0 to support the 'no_check_time' flag
     # used with the 'openssl cms verify' command. This flag bypasses timestamp checks, and will be removed once
@@ -124,14 +163,32 @@ def openssl_version_supported_for_signature_validation():
     # For private preview release only, signature validation is only supported on distros with OpenSSL >= 1.1.0, and
     # users will be informed accordingly. If the OpenSSL version is too old, we log this and return False rather than
     # raising an error.
-    openssl_version = _get_openssl_version()
-    if FlexibleVersion(openssl_version) < _MIN_OPENSSL_VERSION_FOR_SIG_VALIDATION:
-        msg = ("Signature validation requires OpenSSL version {0}, but the current version is {1}. "
-               "To validate signature, please upgrade OpenSSL to version {0} or higher.").format(
-            _MIN_OPENSSL_VERSION_FOR_SIG_VALIDATION, openssl_version)
-        logger.info(msg)
+    #
+    # The result is cached after the first call so the OpenSSL version check (and any associated log/telemetry) only
+    # runs once per agent execution.
+    version_supports_validation = _OpenSSLVersionCheck.get_version_supports_validation()
+    if version_supports_validation is not None:
+        return version_supports_validation
+
+    try:
+        openssl_version = _get_openssl_version()
+        if FlexibleVersion(openssl_version) < _MIN_OPENSSL_VERSION_FOR_SIG_VALIDATION:
+            msg = ("Signature validation requires OpenSSL version {0}, but the current version is {1}. "
+                   "To validate signature, please upgrade OpenSSL to version {0} or higher.").format(
+                _MIN_OPENSSL_VERSION_FOR_SIG_VALIDATION, openssl_version)
+            logger.info(msg)
+            add_event(op=WALAEventOperation.SignatureValidation, is_success=True,
+                      message=msg, log_event=False)     # is_success=True to avoid polluting release monitoring queries while we collect telemetry on this feature
+            _OpenSSLVersionCheck.set_version_supports_validation(False)
+            return False
+        _OpenSSLVersionCheck.set_version_supports_validation(True)
+        return True
+    except Exception as ex:
+        msg = "Failed to determine if OpenSSL version supports signature validation. Error: {0}".format(ustr(ex))
+        logger.warn(msg)
+        add_event(op=WALAEventOperation.SignatureValidation, is_success=False, message=msg, log_event=False)
+        _OpenSSLVersionCheck.set_version_supports_validation(False)
         return False
-    return True
 
 
 def _write_signature_to_file(sig_string, output_file):
@@ -149,6 +206,12 @@ def report_validation_event(op, level, message, name, version, duration):
     'level' is expected to be one of logger.LogLevel.INFO, WARNING, or ERROR. If level is WARNING, prefix with "[WARNING]"
     in telemetry, and append a message that failure can be ignored.
 
+    Telemetry 'is_success' behavior based on log level:
+        - ERROR: is_success=False, these should surface in release error monitoring queries.
+        - WARNING: is_success=True. WARNING-level events should not surface in release error monitoring queries while
+            we are collecting telemetry for this feature. TODO: is_success = False once we start enforcing signature validation
+        - INFO: is_success=True.
+
     TODO: for extension signature validation, add '[Name-Version]' prefix to log messages
     """
     if level == logger.LogLevel.ERROR:
@@ -159,7 +222,7 @@ def report_validation_event(op, level, message, name, version, duration):
         message = "{0}\nThis failure can be safely ignored; will continue processing the package.".format(message)
         logger.warn(message)
         event_msg = "[WARNING] {0}".format(message)
-        is_success = False
+        is_success = True
     else:
         # Log as INFO. If the level is invalid (i.e., not INFO, WARNING, or ERROR), treat it as INFO and prepend a warning to the message.
         if level != logger.LogLevel.INFO:
@@ -230,10 +293,13 @@ def validate_signature(package_path, signature, package_full_name):
         # If the systemd-run invocation fails, disable cgroups entirely and fall back to running the OpenSSL command directly.
         use_cgroups = CGroupConfigurator.get_instance().enabled()
         if use_cgroups:
-            slice_name = EXT_SIGNATURE_VALIDATION_SLICE_NAME + ".slice"
-            scope_name = EXT_SIGNATURE_VALIDATION_CGROUPS_UNIT_NAME + ".scope"
-            systemd_cmd = ['systemd-run', '--unit={0}'.format(scope_name), '--slice={0}'.format(slice_name), '--scope',
-                           '--property=CPUQuota={0}'.format(EXT_SIGNATURE_VALIDATION_CPU_QUOTA)]
+            slice_name = PKG_SIGNATURE_VALIDATION_SLICE_NAME + ".slice"
+            # Use a unique unit name per invocation to avoid collisions with prior transient units that systemd may
+            # not have garbage-collected yet (e.g. if a previous invocation left the unit in a 'failed' state). This
+            # mirrors the pattern used by start_extension_command() in cgroupapi.py.
+            unit_name = "{0}_{1}".format(PKG_SIGNATURE_VALIDATION_CGROUPS_UNIT_NAME, ustr(uuid.uuid4()))
+            systemd_cmd = ['systemd-run', '--unit={0}'.format(unit_name), '--slice={0}'.format(slice_name), '--scope',
+                           '--property=CPUQuota={0}'.format(PKG_SIGNATURE_VALIDATION_CPU_QUOTA)]
 
             # Add accounting properties based on cgroup version
             accounting_props, accounting_vals = CGroupConfigurator.get_instance().get_cgroups_api().get_accounting_properties()
@@ -248,7 +314,7 @@ def validate_signature(package_path, signature, package_full_name):
             except CommandError as ex:
                 # If the systemd-run invocation itself failed, disable cgroups entirely and fall back to running openssl command directly.
                 # If the openssl command failed, re-raise and do not retry.
-                if is_systemd_run_failure(EXT_SIGNATURE_VALIDATION_CGROUPS_UNIT_NAME, ex.stderr):
+                if is_systemd_run_failure(unit_name, ex.stderr):
                     error_msg = "'systemd-run' invocation failed for signature validation, disabling cgroups and falling back to direct execution. Error: '{0}'".format(ex.stderr)
                     report_validation_event(op=WALAEventOperation.SignatureValidation, level=logger.LogLevel.WARNING,
                         message=error_msg,
@@ -297,7 +363,7 @@ def validate_signature(package_path, signature, package_full_name):
                                     name=name, version=version, duration=0)
 
 
-def validate_handler_manifest_signing_info(manifest, ext_handler):
+def validate_extension_manifest_signing_info(manifest, ext_handler):
     """
     For signed extensions, the handler manifest includes a "signingInfo" section that specifies
     the type, publisher, and version of the extension. During signature validation (after extracting zip package),
@@ -315,9 +381,9 @@ def validate_handler_manifest_signing_info(manifest, ext_handler):
                                 name=ext_handler.name, version=ext_handler.version, duration=0)
 
         # Check that 'signingInfo' exists in the manifest structure
-        man_signing_info = manifest.data.get("signingInfo")
+        man_signing_info = manifest.get_signing_info()
         if man_signing_info is None:
-            raise ManifestValidationError(msg="HandlerManifest.json does not contain 'signingInfo'",
+            raise ManifestValidationError(msg="HandlerManifest.json does not contain 'signingInfo' for extension '{0}'".format(ext_handler),
                                           operation=WALAEventOperation.PackageSigningInfoResult, duration=elapsed_milliseconds(start_time))
 
         def validate_attribute(attribute, extension_value):
@@ -325,12 +391,12 @@ def validate_handler_manifest_signing_info(manifest, ext_handler):
             # If not, raise a ManifestValidationError.
             signing_info_value = man_signing_info.get(attribute)
             if signing_info_value is None:
-                raise ManifestValidationError(msg="HandlerManifest.json does not contain attribute 'signingInfo.{0}'".format(attribute),
+                raise ManifestValidationError(msg="HandlerManifest.json does not contain attribute 'signingInfo.{0}' for extension '{1}'".format(attribute, ext_handler),
                                               operation=WALAEventOperation.PackageSigningInfoResult, duration=elapsed_milliseconds(start_time))
 
             # Comparison should be case-insensitive, because CRP ignores case for extension name.
             if extension_value.lower() != signing_info_value.lower():
-                raise ManifestValidationError(msg="expected extension {0} '{1}' does not match downloaded package {0} '{2}'".format(attribute, extension_value, signing_info_value),
+                raise ManifestValidationError(msg="expected extension {0} '{1}' does not match downloaded package {0} '{2}' for extension '{3}'".format(attribute, extension_value, signing_info_value, ext_handler),
                                               operation=WALAEventOperation.PackageSigningInfoResult, duration=elapsed_milliseconds(start_time))
 
         # Compare extension attributes against the attributes specified in 'signingInfo'
@@ -350,15 +416,79 @@ def validate_handler_manifest_signing_info(manifest, ext_handler):
     except Exception as ex:
         # Catch any exceptions unrelated to 'signingInfo' validation (e.g. incorrectly formatted extension name) and raise as a ManifestValidationError with zero duration.
         raise ManifestValidationError(msg="Error during manifest 'signingInfo' validation for extension '{0}'. Error: {1}".format(ext_handler, ustr(ex)),
-                                      operation=WALAEventOperation.SignatureValidation, duration=0)
+                                      operation=WALAEventOperation.PackageSigningInfoResult, duration=0)
+
+
+def validate_agent_manifest_signing_info(manifest, expected_agent_version):
+    """
+    For signed agent packages, the handler manifest includes a "signingInfo" section that specifies
+    the 'name' and 'version' of the agent.
+
+    During agent package validation, we check the 'signingInfo' attributes against the
+    expected values. If there is a mismatch, raise a ManifestValidationError.
+
+    Unlike extensions, the agent's "signingInfo" does not include 'publisher' or 'type'. Those values are
+    not delivered in the goal state for the agent, so there would be no value in checking those from the
+    handler manifest. Instead the agent expects a 'name' attribute which should match the expected name.
+
+    :param manifest: HandlerManifest object
+    :param expected_agent_version: the expected agent version string (e.g., "9.9.9.9")
+    :raises ManifestValidationError: if handler manifest validation fails
+    """
+    start_time = datetime_min_utc
+    agent_full_name = "{0}-{1}".format(AGENT_NAME, expected_agent_version)
+    try:
+        start_time = datetime.datetime.now(UTC)
+        report_validation_event(op=WALAEventOperation.SignatureValidation, level=logger.LogLevel.INFO,
+                                message="Validating handler manifest 'signingInfo' of agent '{0}'".format(agent_full_name),
+                                name=AGENT_NAME, version=expected_agent_version, duration=0)
+
+        # Check that 'signingInfo' exists in the manifest structure
+        man_signing_info = manifest.get_signing_info()
+        if man_signing_info is None:
+            raise ManifestValidationError(msg="HandlerManifest.json does not contain 'signingInfo' for agent '{0}'".format(agent_full_name),
+                                          operation=WALAEventOperation.PackageSigningInfoResult, duration=elapsed_milliseconds(start_time))
+
+        def validate_attribute(attribute, expected_value):
+            # Validate that the specified 'attribute' exists in 'signingInfo', and that it matches the expected 'expected_value'.
+            # If not, raise a ManifestValidationError.
+            signing_info_value = man_signing_info.get(attribute)
+            if signing_info_value is None:
+                raise ManifestValidationError(msg="HandlerManifest.json does not contain attribute 'signingInfo.{0}' for agent '{1}'".format(attribute, agent_full_name),
+                                              operation=WALAEventOperation.PackageSigningInfoResult, duration=elapsed_milliseconds(start_time))
+            
+            # Case-sensitive comparison, unlike the extensions signingInfo comparison which is case-insensitive.
+            # AGENT_SIGNING_INFO_NAME is hardcoded and the manifest is generated from the same constant that we use for comparison and
+            # version is numeric, so any case difference should be surfaced.
+            if ustr(expected_value) != ustr(signing_info_value):
+                raise ManifestValidationError(msg="expected agent {0} '{1}' does not match downloaded package {0} '{2}' for agent '{3}'".format(attribute, expected_value, signing_info_value, agent_full_name),
+                                              operation=WALAEventOperation.PackageSigningInfoResult, duration=elapsed_milliseconds(start_time))
+
+        # Compare agent attributes against the attributes specified in 'signingInfo'
+        validate_attribute(attribute="name", expected_value=AGENT_SIGNING_INFO_NAME)
+        validate_attribute(attribute="version", expected_value=expected_agent_version)
+
+        report_validation_event(op=WALAEventOperation.PackageSigningInfoResult, level=logger.LogLevel.INFO,
+                                message="Successfully validated handler manifest 'signingInfo' for agent '{0}'".format(agent_full_name),
+                                name=AGENT_NAME, version=expected_agent_version, duration=elapsed_milliseconds(start_time))
+
+    except ManifestValidationError:
+        # Should not be caught by the general Exception block
+        raise
+
+    except Exception as ex:
+        # Catch any exceptions unrelated to 'signingInfo' validation and raise as a ManifestValidationError with zero duration.
+        raise ManifestValidationError(msg="Error during manifest 'signingInfo' validation for agent '{0}'. Error: {1}".format(agent_full_name, ustr(ex)),
+                                      operation=WALAEventOperation.PackageSigningInfoResult, duration=0)
 
 
 def _should_delay_signature_validation():
     """
-    Extension signature validation is a CPU-intensive operation that may impact VM provisioning time. To avoid affecting TDPR
+    Signature validation is a CPU-intensive operation that may impact VM provisioning time. To avoid affecting TDPR
     for performance-sensitive users, we implement an initial delay period after agent startup (set via conf flag
     Debug.SignatureValidationInitialDelay), during which signature validation is skipped. This allows us to gather telemetry
-    without impacting TDPR.
+    without impacting TDPR. This strategy will be used for both agent and extension signature validation while gathering
+    telemetry.
 
     This function returns True if we are still within the delay period, False otherwise.
 
@@ -372,20 +502,98 @@ def _should_delay_signature_validation():
     return elapsed < datetime.timedelta(seconds=delay_seconds)
 
 
-def signature_validation_enabled():
+# Tracks whether we have already reported an error while checking the expiry time so we don't log/emit telemetry on every call.
+# _is_signature_validation_telemetry_expired() can be called multiple times during a single goal state execution
+class _ExpiryCheckErrorReporter(object):
+    _reported = False
+
+    @staticmethod
+    def already_reported():
+        return _ExpiryCheckErrorReporter._reported
+
+    @staticmethod
+    def mark_reported():
+        _ExpiryCheckErrorReporter._reported = True
+
+
+def _is_signature_validation_telemetry_expired():
     """
-    Returns True if all conditions for signature validation are met:
-    - Conf flag 'EnableSignatureValidation' is True
-    - Validation timeout has not been exceeded (TODO: remove after telemetry release)
-    - Initial delay period after agent start has passed (TODO: remove after telemetry release)
-    - OpenSSL version supports required validation parameters (TODO: remove after timestamp validation implemented)
+    We disable the agent signature validation feature after the expiry time. This is to prevent any long-term unintended
+    behaviors in the agent if this version of the agent is baked-in to an image.
+    """
+    try:
+        expiry_date = datetime.datetime.strptime(conf.get_signature_validation_telemetry_expiry_time(), "%Y-%m-%d").replace(tzinfo=UTC)
+        return datetime.datetime.now(UTC) >= expiry_date
+    except Exception as ex:
+        # Catch any exception (e.g. ValueError from a malformed date string) and treat the feature as expired so we fail safe.
+        # Only report the error once per agent execution to avoid flooding the log, since this function can be called
+        # multiple times for a single goal state.
+        if not _ExpiryCheckErrorReporter.already_reported():
+            _ExpiryCheckErrorReporter.mark_reported()
+            msg = ("Error while checking signature validation expiry time "
+                   "(Debug.SignatureValidationTelemetryExpiryTime) from conf, will skip signature validation. "
+                   "Error: {0}").format(ustr(ex))
+            logger.warn(msg)
+            add_event(op=WALAEventOperation.SignatureValidation, is_success=False, message=msg, log_event=False)
+        return True
+
+
+def ext_signature_validation_enabled():
+    """
+    Returns True if all conditions for extension signature validation are met:
+    - Conf flag 'EnableExtSignatureValidation' is True
     - Agent is running on a Confidential VM (TODO: remove when all VMs are supported)
+    - Extension signature validation timeout has not been exceeded (TODO: remove after telemetry release)
+    - Initial delay period after agent start has passed (TODO: remove after telemetry release)
+    - Signature validation feature is not expired according to Conf flag 'Debug.SignatureValidationTelemetryExpiryTime' (TODO: remove after telemetry release(s))
+    - OpenSSL version supports required validation parameters (TODO: remove after timestamp validation implemented)
     """
-    return conf.get_signature_validation_enabled() and \
-        not SignatureValidationTimeout.is_validation_disabled() and \
-        not _should_delay_signature_validation() and \
-        openssl_version_supported_for_signature_validation() and \
-        ConfidentialVMInfo.is_confidential_vm()
+    return conf.get_ext_signature_validation_enabled() and \
+           ConfidentialVMInfo.is_confidential_vm() and \
+           not SignatureValidationTimeout.is_ext_validation_disabled() and \
+           not _should_delay_signature_validation() and \
+           not _is_signature_validation_telemetry_expired() and \
+           openssl_version_supported_for_signature_validation()
+
+
+def agent_signature_validation_enabled():
+    """
+    Returns True if all conditions for agent signature validation are met:
+        - Conf flag 'EnableAgentSignatureValidation' is True
+        - Agent is running on a Confidential VM (TODO: remove when all VMs are supported)
+        - Agent signature validation timeout has not been exceeded (TODO: remove after telemetry release(s))
+        - Initial delay period after agent start has passed (TODO: remove after telemetry release(s))
+        - Signature validation feature is not expired according to Conf flag 'Debug.SignatureValidationTelemetryExpiryTime' (TODO: remove after telemetry release(s))
+        - OpenSSL version supports all validation parameters (TODO: remove after timestamp validation implemented)
+
+    Agent package signature validation is currently limited to CVMs for telemetry/preview releases. It will be expanded to all VMs after we gain confidence in the feature.
+    TODO: Remove the is_confidential_vm() check once signature validation is supported on all VMs.
+    """
+    return conf.get_agent_signature_validation_enabled() and \
+           ConfidentialVMInfo.is_confidential_vm() and \
+           not SignatureValidationTimeout.is_agent_validation_disabled() and \
+           not _should_delay_signature_validation() and \
+           not _is_signature_validation_telemetry_expired() and \
+           openssl_version_supported_for_signature_validation()
+
+
+def agent_signature_goal_state_telemetry_enabled():
+    """
+    Returns True if all conditions for agent signature goal state telemetry are met:
+        - Conf flag 'EnableAgentSignatureValidation' is True
+        - Agent is running on a Confidential VM (TODO: remove when all VMs are supported)
+        - Agent signature validation feature is not expired according to Conf flag 'Debug.SignatureValidationTelemetryExpiryTime' (TODO: remove after telemetry release(s))
+
+    We separate goal state telemetry enablement from signature validation enablement because validation enablement has
+    performance concerns and openssl requirements, whereas sending telemetry on goal state signature contents has no
+    performance concerns or dependencies on OpenSSL.
+
+    Agent package signature validation is currently limited to CVMs for telemetry/preview releases. It will be expanded to all VMs after we gain confidence in the feature.
+    TODO: Remove the is_confidential_vm() check once signature validation is supported on all VMs.
+    """
+    return conf.get_agent_signature_validation_enabled() and \
+           ConfidentialVMInfo.is_confidential_vm() and \
+           not _is_signature_validation_telemetry_expired()
 
 
 def cleanup_package_with_invalid_signature(package_file):

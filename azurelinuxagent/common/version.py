@@ -215,10 +215,13 @@ def has_logrotate():
 AGENT_NAME = "WALinuxAgent"
 AGENT_LONG_NAME = "Azure Linux Agent"
 #
-# IMPORTANT: Please be sure that the version is always 9.9.9.9 on the develop branch. Automation requires this, otherwise
-#            DCR may test the wrong agent version.
+# IMPORTANT:
+# - During development: Always use version 9.9.9.9
+#   This placeholder version is required by automation to distinguish
+#   development builds from official releases during E2E testing.
 #
-#            When doing a release, be sure to use the actual agent version. Current agent version: 2.4.0.0
+# - During release: Use the actual agent version (e.g., 2.4.0.0)
+#   Update this value before creating a release.
 #
 AGENT_VERSION = '9.9.9.9'
 AGENT_LONG_VERSION = "{0}-{1}".format(AGENT_NAME, AGENT_VERSION)
@@ -227,6 +230,9 @@ The Azure Linux Agent supports the provisioning and running of Linux
 VMs in the Azure cloud. This package should be installed on Linux disk
 images that are built to run in the Azure environment.
 """
+# Expected value of the 'signingInfo.name' attribute in the agent package's HandlerManifest.json.
+# Used both when generating the manifest and when validating it during update.
+AGENT_SIGNING_INFO_NAME = "Microsoft.OSTCLinuxAgent"
 
 AGENT_DIR_GLOB = "{0}-*".format(AGENT_NAME)
 AGENT_PKG_GLOB = "{0}-*.zip".format(AGENT_NAME)
