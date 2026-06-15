@@ -182,7 +182,6 @@ class UpdateHandler(object):
         # List of thread handlers managed by this UpdateHandler; populated in run() and used during shutdown
         self._all_thread_handlers = []
 
-
         if not conf.get_extensions_enabled():
             self._goal_state_period = GOAL_STATE_PERIOD_EXTENSIONS_DISABLED
         else:
@@ -1073,9 +1072,14 @@ class UpdateHandler(object):
         return os.path.join(conf.get_lib_dir(), INITIAL_GOAL_STATE_FILE)
 
     def _shutdown(self):
-        # _shutdown() is invoked when the ext-handler exits its main loop (normal completion or
-        # ExitException paths) and from the daemon's forward_signal() when the daemon receives
-        # SIGTERM. It is responsible for stopping all worker threads started by run().
+        # _shutdown() is invoked from the ext-handler's run() loop when it exits naturally
+        # (normal completion, ExitException, or AgentUpgradeExitException). It stops all worker
+        # threads started by run() in dependency order so they can finish their in-flight work.
+        #
+        # Note: when the ext-handler is killed via SIGTERM (e.g., systemctl stop), this method is
+        # NOT invoked in the ext-handler process - the process is terminated abruptly. The same
+        # method is also called from the daemon's forward_signal(), but in the daemon process
+        # _all_thread_handlers is empty, so it only cleans up the sentinel file.
         self.is_running = False
 
         # Build an explicit shutdown order so we don't rely on the order of items in self._all_thread_handlers.

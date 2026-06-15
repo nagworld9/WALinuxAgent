@@ -2,8 +2,8 @@
 # This test validates that the ext-handler shuts down gracefully on the natural exit paths
 # (AgentUpgradeExitException / ExitException) by triggering a self-update and then verifying
 # in waagent.log that:
-#   1. Every worker thread started by UpdateHandler.run() is signaled to stop
-#   2. Every worker thread either finishes cleanly or is reported as not stopping within the timeout
+#   1. Every thread started by UpdateHandler.run() is signaled to stop
+#   2. Every thread either finishes cleanly or is reported as not stopping within the timeout
 #
 name: "AgentGracefulShutdown"
 tests:

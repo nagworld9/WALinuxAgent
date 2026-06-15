@@ -326,7 +326,7 @@ class LogCollectorMonitorHandler(ThreadHandlerInterface):
             self.join()
 
     def join(self):
-        self.event_thread.join()
+        self.event_thread.join(timeout=self._THREAD_JOIN_TIMEOUT)
 
     def stopped(self):
         return not self.should_run
