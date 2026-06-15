@@ -59,10 +59,10 @@ _ALWAYS_RUNNING_THREADS = [
 # Started only when log collection is enabled.
 _LOG_COLLECTOR_THREAD = "CollectLogsHandler"
 
-# Emitted by collect_logs.is_log_collection_allowed() during agent startup. The agent prints "[True]"
-# when all preconditions are met and the CollectLogsHandler thread will be started, "[False]" otherwise.
-# We use this to decide whether the collector is expected to appear in the shutdown sequence.
-_LOG_COLLECTION_ALLOWED_RE = re.compile(r"log collection is allowed at this time \[True]")
+# Emitted by collect_logs.is_log_collection_allowed() during agent startup. The agent logs
+#   "Log collection is supported. All three conditions must be met: ..."     when allowed
+#   "Log collection is not supported. All three conditions must be met: ..." when not allowed
+_LOG_COLLECTION_ALLOWED_RE = re.compile(r"Log collection is supported\.")
 
 # AgentUpgradeExitException reason produced by self_update_version_updater.proceed_with_update().
 # We use this as an anchor in the log to locate the AgentUpgrade-driven shutdown sequence.
@@ -157,16 +157,15 @@ class AgentGracefulShutdown(SelfUpdateBvt):
         # cgroup support, supported python, etc.). We asked for it via configuration, but if the
         # runtime preconditions are not met the thread will not be started and will not appear in
         # the shutdown sequence at all. So we look for the agent's startup log line
-        # "log collection is allowed at this time [True]" to decide whether it is expected.
+        # "Log collection is supported." to decide whether it is expected.
         expected_threads = set(_ALWAYS_RUNNING_THREADS)
         log_collection_allowed = any(_LOG_COLLECTION_ALLOWED_RE.search(line) for line in lines)
         if log_collection_allowed:
             expected_threads.add(_LOG_COLLECTOR_THREAD)
         else:
             log.info(
-                "Log collection is not allowed on this VM (no 'log collection is allowed at this "
-                "time [True]' entry in waagent.log); CollectLogsHandler is not expected in the "
-                "shutdown sequence.")
+                "Log collection is not allowed on this VM (no 'Log collection is supported.' entry "
+                "in waagent.log); CollectLogsHandler is not expected in the shutdown sequence.")
 
         missing_signals = expected_threads - signaled
         missing_terminal = expected_threads - terminal
