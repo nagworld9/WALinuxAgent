@@ -56,8 +56,15 @@ def _create_collect_logs_handler(iterations=1, cgroup_version=CgroupVersions.V1,
         protocol_util = MagicMock()
         protocol_util.get_protocol = Mock(return_value=protocol)
         with patch("azurelinuxagent.ga.collect_logs.get_protocol_util", return_value=protocol_util):
+            # CollectLogsHandler.daemon() calls self.stopped() twice per requested iteration:
+            #   1. Once for the early-exit check right after the initial delay, so that a shutdown
+            #      signaled while the daemon is sleeping causes it to return immediately without
+            #      starting a fresh log-collection cycle.
+            #   2. Once per turn of the `while not self.stopped()` main loop.
+            # So we need 1 (early exit) + N (loop enters) + 1 (loop exits) = N + 2 mocked values,
+            # where N is the requested iteration count.
             with patch("azurelinuxagent.ga.collect_logs.CollectLogsHandler.stopped",
-                       side_effect=[False] * iterations + [True]):
+                       side_effect=[False] * (iterations + 1) + [True]):
                 with patch("azurelinuxagent.ga.collect_logs.conf.get_log_collector_initial_delay", return_value=0):
                     with patch("azurelinuxagent.ga.collect_logs.conf.get_collect_logs_period", return_value=0):
                         with patch("azurelinuxagent.ga.collect_logs.conf.get_collect_logs", return_value=collect_logs_conf):
