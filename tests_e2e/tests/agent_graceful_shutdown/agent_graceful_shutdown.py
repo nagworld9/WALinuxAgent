@@ -43,7 +43,10 @@ from typing import Any, Dict, List
 
 from assertpy import fail
 
+from azurelinuxagent.ga.interfaces import ThreadHandlerBase
+
 from tests_e2e.tests.agent_update.self_update import SelfUpdateBvt
+from tests_e2e.tests.lib.agent_log import AgentLog
 from tests_e2e.tests.lib.logging import log
 from tests_e2e.tests.lib.retry import retry_if_false
 
@@ -74,6 +77,19 @@ _SIGNAL_LINE_RE = re.compile(r"Signaling (\S+) thread to stop\.\.\.")
 _STOPPED_OK_RE = re.compile(r"(\S+) thread stopped successfully")
 _STOPPED_TIMEOUT_RE = re.compile(r"(\S+) thread did not stop within the timeout")
 
+# Upper bound on how long the entire shutdown sequence should take, measured from the first
+# "Signaling X thread to stop..." line to the last terminal line.
+#
+# Derivation, based on UpdateHandler._shutdown() and ThreadHandlerBase._THREAD_JOIN_TIMEOUT:
+#   Phase 1 (sequential) stops TelemetryEventsCollector and then SendTelemetryHandler one at a
+#       time, each bounded by _THREAD_JOIN_TIMEOUT -> up to 2 * 5s = 10s.
+#   Phase 2/3 (parallel) signals every remaining handler at once and then joins them in parallel,
+#       so the slowest single join determines the wall-clock cost -> up to 1 * 5s = 5s.
+#   Baseline worst case: 3 * _THREAD_JOIN_TIMEOUT = 15s.
+#
+# A 10s buffer is added for log I/O latency
+_MAX_SHUTDOWN_DURATION_SECS = 3 * ThreadHandlerBase._THREAD_JOIN_TIMEOUT + 10  # pylint: disable=protected-access
+
 
 class AgentGracefulShutdown(SelfUpdateBvt):
     """
@@ -82,6 +98,12 @@ class AgentGracefulShutdown(SelfUpdateBvt):
     """
 
     def run(self):
+        # Timestamps of the first "Signaling ... to stop" line and the last terminal line in the
+        # shutdown sequence. Populated by _check_shutdown_sequence() on success and consumed by
+        # _verify_shutdown_duration().
+        self._first_signal_ts = None
+        self._last_terminal_ts = None
+
         log.info("Setting up the VM with a custom older-version agent package...")
         # _test_setup() is provided by SelfUpdateBvt. It rotates /var/log/waagent.log, installs
         # the custom older-version pkg, and configures AutoUpdate.UpdateToLatestVersion=y so the
@@ -117,37 +139,75 @@ class AgentGracefulShutdown(SelfUpdateBvt):
             fail("Did not find the expected graceful-shutdown sequence in /var/log/waagent.log "
                  "after the agent self-upgraded. See the logs above for details.")
 
+        # The structural check passed; now verify the sequence completed within the bound
+        # dictated by the per-thread join timeout.
+        self._verify_shutdown_duration()
+
+    def _verify_shutdown_duration(self) -> None:
+        """
+        Verifies that the entire shutdown sequence completed within _MAX_SHUTDOWN_DURATION_SECS.
+
+        The duration is measured from the first "Signaling X thread to stop..." line (the start
+        of UpdateHandler._shutdown()) to the last "thread stopped successfully" or "thread did
+        not stop within the timeout" line (the end of the join phase). Both timestamps were
+        captured by _check_shutdown_sequence().
+        """
+        if self._first_signal_ts is None or self._last_terminal_ts is None:
+            fail("Internal: shutdown markers were present per _check_shutdown_sequence() but "
+                 "AgentLogRecord.timestamp returned None for at least one of them.")
+            return
+
+        duration = (self._last_terminal_ts - self._first_signal_ts).total_seconds()
+        log.info(
+            "Shutdown duration: %.2fs (first signal=%s, last terminal=%s, bound=%ds).",
+            duration, self._first_signal_ts.isoformat(), self._last_terminal_ts.isoformat(),
+            _MAX_SHUTDOWN_DURATION_SECS)
+
+        if duration > _MAX_SHUTDOWN_DURATION_SECS:
+            fail(
+                "Graceful shutdown took {0:.2f}s, which exceeds the {1}s upper bound. "
+                "The bound is 3 * ThreadHandlerBase._THREAD_JOIN_TIMEOUT (={2}s) plus a "
+                "buffer for I/O and log latency; exceeding it indicates the per-thread join "
+                "timeout is being violated, or that shutdown is serializing operations that "
+                "should run in parallel.".format(
+                    duration, _MAX_SHUTDOWN_DURATION_SECS,
+                    ThreadHandlerBase._THREAD_JOIN_TIMEOUT))  # pylint: disable=protected-access
+
     def _check_shutdown_sequence(self) -> bool:
-        # Read the current waagent.log via SSH. The setup script rotates the log, so this file
-        # only contains log lines from after the test setup ran.
         contents = self._ssh_client.run_command("cat /var/log/waagent.log", use_sudo=True)
-        lines = contents.splitlines()
+        records = list(AgentLog(contents=contents).read())
 
         # Find the AgentUpgrade marker; if it is not yet present the upgrade has not started.
-        upgrade_indices = [i for i, line in enumerate(lines) if _UPGRADE_MARKER_RE.search(line)]
+        upgrade_indices = [i for i, r in enumerate(records) if _UPGRADE_MARKER_RE.search(r.message)]
         if not upgrade_indices:
             log.info("AgentUpgrade marker not found yet in waagent.log; will retry.")
             return False
 
-        # Take the slice of the log starting from the upgrade marker. The shutdown sequence is
+        # Take the slice of records starting from the upgrade marker. The shutdown sequence is
         # emitted between this marker and the call to sys.exit(0), so anything after the marker
         # (and before the next agent process starts logging) is the shutdown.
-        shutdown_section = lines[upgrade_indices[0]:]
+        shutdown_section = records[upgrade_indices[0]:]
 
         signaled = set()
         terminal = set()  # threads that either stopped successfully or were reported as timed out
-        for line in shutdown_section:
-            m = _SIGNAL_LINE_RE.search(line)
+        first_signal_ts = None
+        last_terminal_ts = None
+        for record in shutdown_section:
+            m = _SIGNAL_LINE_RE.search(record.message)
             if m:
                 signaled.add(m.group(1))
+                if first_signal_ts is None:
+                    first_signal_ts = record.timestamp
                 continue
-            m = _STOPPED_OK_RE.search(line)
+            m = _STOPPED_OK_RE.search(record.message)
             if m:
                 terminal.add(m.group(1))
+                last_terminal_ts = record.timestamp
                 continue
-            m = _STOPPED_TIMEOUT_RE.search(line)
+            m = _STOPPED_TIMEOUT_RE.search(record.message)
             if m:
                 terminal.add(m.group(1))
+                last_terminal_ts = record.timestamp
                 continue
 
         # Decide which threads we expect in the shutdown sequence. The four threads in
@@ -159,7 +219,7 @@ class AgentGracefulShutdown(SelfUpdateBvt):
         # the shutdown sequence at all. So we look for the agent's startup log line
         # "Log collection is supported." to decide whether it is expected.
         expected_threads = set(_ALWAYS_RUNNING_THREADS)
-        log_collection_allowed = any(_LOG_COLLECTION_ALLOWED_RE.search(line) for line in lines)
+        log_collection_allowed = any(_LOG_COLLECTION_ALLOWED_RE.search(r.message) for r in records)
         if log_collection_allowed:
             expected_threads.add(_LOG_COLLECTOR_THREAD)
         else:
@@ -186,6 +246,9 @@ class AgentGracefulShutdown(SelfUpdateBvt):
             return False
 
         log.info("All expected threads were signaled and either stopped or timed out as expected.")
+        # Stash timestamps for the duration check performed by _verify_shutdown_duration().
+        self._first_signal_ts = first_signal_ts
+        self._last_terminal_ts = last_terminal_ts
         return True
 
     def get_ignore_error_rules(self) -> List[Dict[str, Any]]:

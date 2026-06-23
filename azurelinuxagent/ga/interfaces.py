@@ -20,107 +20,126 @@
 import threading
 
 
-class ThreadHandlerInterface(object):
+class ThreadHandlerBase(object):
     """
-    Interface and shared base for all thread handlers.
+    Abstract base class for all thread handlers.
 
-    Each handler creates a background thread that runs a daemon loop. To support graceful shutdown, this base class
-    provides a shared threading.Event (self._stop_event) that makes sleep operations in the daemon loop interruptible:
+    Lifecycle (mirrors threading):
 
-    - Without the event, threads use time.sleep() between loop iterations. time.sleep() is uninterruptible -- if a
-      thread is sleeping for several minutes, calling stop() would have to wait that entire duration before the
-      thread wakes up and checks its stop flag.
+        handler.start()                          # launch the worker thread
+        ...
+        handler.stop()                           # signal the thread to exit; non-blocking; idempotent
+        handler.join(timeout=...)                # wait up to 'timeout' seconds for it to actually exit
+        handler.is_alive()                       # True until the thread has exited
 
-    - With the event, threads call self._interruptible_sleep(timeout) (which delegates to self._stop_event.wait).
-      This behaves identically to time.sleep() during normal operation (blocks for the specified duration), but when
-      stop() is called, self._signal_stop() sets the event, which immediately wakes up any thread waiting on it. The
-      thread then checks its stop flag, sees that it should exit, and terminates promptly.
+    To stop a handler completely, callers do:    handler.stop(); handler.join()
+    Separating the two lets a shutdown sequence broadcast stop() to many handlers and then join them in
+    parallel, instead of serializing each handler's join timeout.
 
-    The stop() method in subclasses should follow this sequence:
-      1. Set the should_run/stopped flag so the daemon loop exits on its next check.
-      2. Call self._signal_stop() to wake up the thread if it is sleeping.
-      3. Call join(timeout=_THREAD_JOIN_TIMEOUT) to wait for the thread to finish its current operation and exit.
+    Subclasses only need to implement get_thread_name() and daemon() (the thread body). The base class
+    provides everything else.
 
-    Subclasses that restart the thread should call self._reset_stop_event() in start() so the new thread does not
-    inherit a "stopped" state from a previous run.
-
-    This approach allows threads to complete their in-progress work (e.g. sending telemetry, processing events)
-    before exiting, while ensuring they wake up promptly instead of sleeping through the shutdown window.
+    Daemon loops should:
+      * Use `while not self.stopped()` (or include `self.stopped()` in their exit condition) so they exit
+        promptly when stop() is called.
+      * Use self._sleep(seconds) instead of time.sleep(seconds), so they wake up immediately when stop()
+        is called, instead of sleeping through the shutdown window.
+      * Use self._run_periodic_operations(ops) instead of a plain for-loop over ops, so they stop the
+        iteration as soon as stop() is called (rather than running every remaining operation first).
     """
 
-    # Default timeout in seconds to wait for threads to stop during shutdown
+    # Default timeout in seconds to wait for the thread to exit when join() is called without an explicit timeout
     _THREAD_JOIN_TIMEOUT = 5
 
     def __init__(self):
-        # Event used to interrupt the daemon loop's sleep when stop() is called. Centralized here so individual
-        # handlers do not have to re-implement the same synchronization boilerplate.
+        # Set when stop() is called; checked by stopped() and waited on by self._sleep().
         self._stop_event = threading.Event()
+        # The underlying daemon thread; created in start(), checked in is_alive(), waited on in join().
+        self._thread = None
 
-    def _interruptible_sleep(self, timeout):
+    # ----- helpers for daemon() implementations -----
+
+    def _sleep(self, timeout):
         """
-        Sleeps for the given timeout (in seconds), but returns early if stop() has been signaled.
+        Blocks for up to 'timeout' seconds, but returns early if another thread calls stop().
         """
         self._stop_event.wait(timeout)
 
-    def _signal_stop(self):
-        """
-        Wakes up the daemon loop if it is currently sleeping in _interruptible_sleep(). Should be called from stop().
-        """
-        self._stop_event.set()
-
-    def _reset_stop_event(self):
-        """
-        Clears the stop signal so the thread can be (re)started cleanly. Should be called from start() before
-        launching a new thread.
-        """
-        self._stop_event.clear()
-
-    def _is_stop_signaled(self):
-        """
-        Returns True once stop() has signaled the thread to exit. Daemon loops can use this to bail out of long
-        operation sequences instead of waiting for the next outer-loop check.
-        """
-        return self._stop_event.is_set()
-
     def _run_periodic_operations(self, periodic_operations):
         """
-        Runs each operation in the given list, but stops early if a shutdown has been signaled. This avoids
-        starting a new periodic operation once stop() has been called.
+        Runs each operation in the given list, but bails out as soon as stop() has been called. This avoids
+        starting a new periodic operation once shutdown has been signaled.
         """
         for op in periodic_operations:
-            if self._is_stop_signaled():
+            if self.stopped():
                 break
             op.run()
+
+    # ----- subclass contract -----
 
     @staticmethod
     def get_thread_name():
         raise NotImplementedError("get_thread_name() not implemented")
 
+    def daemon(self):
+        """
+        The thread body. Subclasses MUST override this with their main loop.
+        """
+        raise NotImplementedError("daemon() not implemented")
+
+    # ----- public lifecycle (provided by the base class) -----
+
     def run(self):
-        raise NotImplementedError("run() not implemented")
+        """
+        Default entry point: launches the worker thread. Subclasses may override to add a log message or
+        restart-existing-thread logic before calling self.start().
+        """
+        self.start()
 
     def keep_alive(self):
         """
-        Returns true if the thread handler should be restarted when the thread dies
-        and false when it should remain dead.
-        
-        Defaults to True and can be overridden by sub-classes.
+        Returns true if the handler should be restarted when the thread dies and false when it should remain
+        dead. Defaults to True; subclasses may override.
         """
         return True
 
+    def stopped(self):
+        """
+        True once stop() has been called. Daemon loops use this in `while not self.stopped()`.
+        """
+        return self._stop_event.is_set()
+
     def is_alive(self):
-        raise NotImplementedError("is_alive() not implemented")
+        """
+        True until the worker thread has exited.
+        """
+        return self._thread is not None and self._thread.is_alive()
 
     def start(self):
-        raise NotImplementedError("start() not implemented")
+        """
+        Launches the daemon loop on a new background thread. Clears the stop event first, so a handler that
+        was previously stopped can be cleanly restarted.
+        """
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self.daemon)
+        self._thread.daemon = True
+        self._thread.name = self.get_thread_name()
+        self._thread.start()
 
     def stop(self):
-        raise NotImplementedError("stop() not implemented")
+        """
+        Signals the thread to exit. Non-blocking and idempotent: repeated calls have no additional effect.
+        Use join() to wait for the thread to actually finish.
+        """
+        self._stop_event.set()
 
-    def signal_stop(self):
+    def join(self, timeout=_THREAD_JOIN_TIMEOUT):
         """
-        Signals the thread to stop without waiting for it to exit. This allows callers to broadcast a stop
-        signal to several handlers in parallel and only join afterwards, rather than serializing the join
-        timeouts inside each handler's stop().
+        Waits up to 'timeout' seconds for the thread to exit. Returns once the thread has finished or the
+        timeout elapses; callers can use is_alive() afterwards to distinguish.
         """
-        raise NotImplementedError("signal_stop() not implemented")
+        if self._thread is not None:
+            try:
+                self._thread.join(timeout=timeout)
+            except RuntimeError:
+                pass

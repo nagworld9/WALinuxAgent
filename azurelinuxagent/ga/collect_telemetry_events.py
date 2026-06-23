@@ -20,7 +20,6 @@ import datetime
 import json
 import os
 import re
-import threading
 import time
 from collections import defaultdict
 
@@ -33,7 +32,7 @@ from azurelinuxagent.common.event import EVENTS_DIRECTORY, TELEMETRY_LOG_EVENT_I
 from azurelinuxagent.common.exception import InvalidExtensionEventError, ServiceStoppedError, EventError
 from azurelinuxagent.common.future import ustr, is_file_not_found_error, UTC
 from azurelinuxagent.common.utils.textutil import redact_sas_token
-from azurelinuxagent.ga.interfaces import ThreadHandlerInterface
+from azurelinuxagent.ga.interfaces import ThreadHandlerBase
 from azurelinuxagent.common.telemetryevent import TelemetryEvent, TelemetryEventParam, \
     GuestAgentGenericLogsSchema, GuestAgentExtensionEventsSchema
 from azurelinuxagent.common.utils import textutil
@@ -569,7 +568,7 @@ class _CollectAndEnqueueEvents(PeriodicOperation):
         event.parameters = trimmed_params
 
 
-class CollectTelemetryEventsHandler(ThreadHandlerInterface):
+class CollectTelemetryEventsHandler(ThreadHandlerBase):
     """
     This Handler takes care of fetching the Extension Telemetry events from the {extension_events_dir} and sends it to
     Kusto for advanced debuggability.
@@ -579,8 +578,6 @@ class CollectTelemetryEventsHandler(ThreadHandlerInterface):
 
     def __init__(self, send_telemetry_events_handler):
         super(CollectTelemetryEventsHandler, self).__init__()
-        self.should_run = True
-        self.thread = None
         self._send_telemetry_events_handler = send_telemetry_events_handler
 
     @staticmethod
@@ -590,32 +587,6 @@ class CollectTelemetryEventsHandler(ThreadHandlerInterface):
     def run(self):
         logger.info("Start Extension Telemetry service.")
         self.start()
-
-    def is_alive(self):
-        return self.thread is not None and self.thread.is_alive()
-
-    def start(self):
-        self._reset_stop_event()
-        self.thread = threading.Thread(target=self.daemon)
-        self.thread.daemon = True
-        self.thread.name = CollectTelemetryEventsHandler.get_thread_name()
-        self.thread.start()
-
-    def signal_stop(self):
-        # Signal the daemon loop to exit without blocking on the thread to finish.
-        self.should_run = False
-        self._signal_stop()
-
-    def stop(self):
-        """
-        Stop server communication and join the thread to main thread.
-        """
-        self.signal_stop()
-        if self.is_alive():
-            self.thread.join(timeout=self._THREAD_JOIN_TIMEOUT)
-
-    def stopped(self):
-        return not self.should_run
 
     def daemon(self):
         periodic_operations = [

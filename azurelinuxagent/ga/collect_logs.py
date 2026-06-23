@@ -19,7 +19,6 @@
 import datetime
 import os
 import sys
-import threading
 from azurelinuxagent.ga import logcollector, cgroupconfigurator
 
 import azurelinuxagent.common.conf as conf
@@ -27,7 +26,7 @@ from azurelinuxagent.common import logger
 from azurelinuxagent.ga.cgroupcontroller import MetricsCounter
 from azurelinuxagent.common.event import elapsed_milliseconds, add_event, WALAEventOperation
 from azurelinuxagent.common.future import ustr, UTC
-from azurelinuxagent.ga.interfaces import ThreadHandlerInterface
+from azurelinuxagent.ga.interfaces import ThreadHandlerBase
 from azurelinuxagent.ga.logcollector import COMPRESSED_ARCHIVE_PATH, GRACEFUL_KILL_ERRCODE
 from azurelinuxagent.ga.cgroupconfigurator import CGroupConfigurator, LOGCOLLECTOR_ANON_MEMORY_LIMIT_FOR_V1_AND_V2, LOGCOLLECTOR_CACHE_MEMORY_LIMIT_FOR_V1_AND_V2, LOGCOLLECTOR_MAX_THROTTLED_EVENTS_FOR_V2
 from azurelinuxagent.common.protocol.util import get_protocol_util
@@ -71,7 +70,7 @@ def is_log_collection_allowed():
     return is_allowed
 
 
-class CollectLogsHandler(ThreadHandlerInterface):
+class CollectLogsHandler(ThreadHandlerBase):
     """
     Periodically collects and uploads logs from the VM to the host.
     """
@@ -102,46 +101,15 @@ class CollectLogsHandler(ThreadHandlerInterface):
         super(CollectLogsHandler, self).__init__()
         self.protocol = None
         self.protocol_util = None
-        self.event_thread = None
-        self.should_run = True
         self.last_state = None
         self.period = conf.get_collect_logs_period()
         self.log_collector_cgroup_path_validation_errors = 0
 
-    def run(self):
-        self.start()
-
     def keep_alive(self):
-        return self.should_run
-
-    def is_alive(self):
-        return self.event_thread is not None and self.event_thread.is_alive()
-
-    def start(self):
-        self._reset_stop_event()
-        self.event_thread = threading.Thread(target=self.daemon)
-        self.event_thread.daemon = True
-        self.event_thread.name = self.get_thread_name()
-        self.event_thread.start()
-
-    def join(self):
-        self.event_thread.join(timeout=self._THREAD_JOIN_TIMEOUT)
-
-    def stopped(self):
-        return not self.should_run
-
-    def signal_stop(self):
-        # Signal the daemon loop to exit without blocking on the thread to finish.
-        self.should_run = False
-        self._signal_stop()
-
-    def stop(self):
-        self.signal_stop()
-        if self.is_alive():
-            try:
-                self.join()
-            except RuntimeError:
-                pass
+        # Don't restart the thread once stop() has been called -- a few of the error paths in
+        # _collect_logs() call self.stop() to permanently disable periodic log collection until the
+        # service restarts.
+        return not self.stopped()
 
     def init_protocols(self):
         # The initialization of ProtocolUtil for the log collection thread should be done within the thread itself
@@ -153,10 +121,10 @@ class CollectLogsHandler(ThreadHandlerInterface):
     def daemon(self):
         # Delay the first collector on start up to give short lived VMs (that might be dead before the second 
         # collection has a chance to run) an opportunity to do produce meaningful logs to collect.
-        # If the stop event is set during the initial delay (e.g. shutdown was requested), return immediately
+        # If the stop event is set during the initial delay (e.g. ext handler exited), return immediately
         # without starting log collection.
-        self._interruptible_sleep(conf.get_log_collector_initial_delay())
-        if self._is_stop_signaled():
+        self._sleep(conf.get_log_collector_initial_delay())
+        if self.stopped():
             return
 
         try:
@@ -171,7 +139,7 @@ class CollectLogsHandler(ThreadHandlerInterface):
                     logger.error("An error occurred in the log collection thread main loop; "
                                  "will skip the current iteration.\n{0}", ustr(e))
                 finally:
-                    self._interruptible_sleep(self.period)
+                    self._sleep(self.period)
         except Exception as e:
             logger.error("An error occurred in the log collection thread; will exit the thread.\n{0}", ustr(e))
         finally:
@@ -287,7 +255,7 @@ def get_log_collector_monitor_handler(controllers):
     return LogCollectorMonitorHandler(controllers)
 
 
-class LogCollectorMonitorHandler(ThreadHandlerInterface):
+class LogCollectorMonitorHandler(ThreadHandlerBase):
     """
     Periodically monitor and checks the Log collector Cgroups and sends telemetry to Kusto.
     """
@@ -300,41 +268,10 @@ class LogCollectorMonitorHandler(ThreadHandlerInterface):
 
     def __init__(self, controllers):
         super(LogCollectorMonitorHandler, self).__init__()
-        self.event_thread = None
-        self.should_run = True
         self.period = 2  # Log collector monitor runs every 2 secs.
         self.controllers = controllers
         self.max_recorded_metrics = {}
         self.__should_log_metrics = conf.get_cgroup_log_metrics()
-
-    def run(self):
-        self.start()
-
-    def signal_stop(self):
-        # Flag the loop to exit on its next iteration; do not block waiting for the thread.
-        self.should_run = False
-        self._signal_stop()
-
-    def stop(self):
-        self.signal_stop()
-        if self.is_alive():
-            self.join()
-
-    def join(self):
-        self.event_thread.join(timeout=self._THREAD_JOIN_TIMEOUT)
-
-    def stopped(self):
-        return not self.should_run
-
-    def is_alive(self):
-        return self.event_thread is not None and self.event_thread.is_alive()
-
-    def start(self):
-        self._reset_stop_event()
-        self.event_thread = threading.Thread(target=self.daemon)
-        self.event_thread.daemon = True
-        self.event_thread.name = self.get_thread_name()
-        self.event_thread.start()
 
     def daemon(self):
         try:
@@ -348,7 +285,7 @@ class LogCollectorMonitorHandler(ThreadHandlerInterface):
                     logger.error("An error occurred in the log collection monitor thread loop; "
                                  "will skip the current iteration.\n{0}", ustr(e))
                 finally:
-                    self._interruptible_sleep(self.period)
+                    self._sleep(self.period)
         except Exception as e:
             logger.error(
                 "An error occurred in the MonitorLogCollectorCgroupsHandler thread; will exit the thread.\n{0}",

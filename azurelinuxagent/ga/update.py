@@ -474,13 +474,13 @@ class UpdateHandler(object):
                 self._all_thread_handlers.append(get_collect_logs_handler())
 
             # Launch all monitoring threads
-            self._start_threads(self._all_thread_handlers)
+            self._start_threads()
 
             logger.info("Goal State Period: {0} sec. This indicates how often the agent checks for new goal states and reports status.", self._goal_state_period)
 
             while self.is_running:
                 self._check_daemon_running(debug)
-                self._check_threads_running(self._all_thread_handlers)
+                self._check_threads_running()
                 self._process_goal_state(exthandlers_handler, remote_access_handler, agent_update_handler)
                 self._send_heartbeat_telemetry(agent_update_handler)
                 self._check_agent_memory_usage()
@@ -588,13 +588,13 @@ class UpdateHandler(object):
         if not debug and self._is_orphaned:
             raise ExitException("Agent {0} is an orphan -- exiting".format(CURRENT_AGENT))
 
-    def _start_threads(self, all_thread_handlers):
-        for thread_handler in all_thread_handlers:
+    def _start_threads(self):
+        for thread_handler in self._all_thread_handlers:
             thread_handler.run()
 
-    def _check_threads_running(self, all_thread_handlers):
+    def _check_threads_running(self):
         # Check that all the threads are still running
-        for thread_handler in all_thread_handlers:
+        for thread_handler in self._all_thread_handlers:
             if thread_handler.keep_alive() and not thread_handler.is_alive():
                 logger.warn("{0} thread died, restarting".format(thread_handler.get_thread_name()))
                 thread_handler.start()
@@ -1127,7 +1127,7 @@ class UpdateHandler(object):
         # _all_thread_handlers is empty, so it only cleans up the sentinel file.
         self.is_running = False
 
-        # Build an explicit shutdown order so we don't rely on the order of items in self._all_thread_handlers.
+        # Build an explicit shutdown order, so we don't rely on the order of items in self._all_thread_handlers.
         #
         # Inter-thread dependencies handled here:
         #   * CollectTelemetryEventsHandler ("TelemetryEventsCollector") produces events into the queue owned by
@@ -1138,39 +1138,30 @@ class UpdateHandler(object):
         #     collector is mid-iteration causes telemetry events to be silently dropped.
         #
         #     To avoid that, we treat the collector and sender as a strictly-ordered dependency pair and stop them
-        #     sequentially: signal the collector and wait for it to actually exit (so it can no longer produce
-        #     events); then signal the sender and wait for it to drain its queue. We do NOT broadcast signal_stop
-        #     across the entire handler list up-front because that would re-introduce the race above.
+        #     sequentially: stop+join the collector first (so it can no longer produce events), then stop+join the
+        #     sender (so it can drain its queue). We do NOT broadcast stop() across the entire handler list up-front
+        #     because that would re-introduce the race above.
         #
-        # All remaining thread handlers are independent of each other; for those we keep the parallel "broadcast
-        # signal_stop, then join" pattern so their join timeouts overlap rather than serializing.
+        # All remaining thread handlers are independent of each other; for those we broadcast stop() first and only
+        # then join, so their join timeouts overlap rather than serializing.
         ordered_thread_names = [CollectTelemetryEventsHandler.get_thread_name(), SendTelemetryEventsHandler.get_thread_name()]
         handlers_by_name = dict((h.get_thread_name(), h) for h in self._all_thread_handlers)
 
-        # Phase 1: stop the dependency-ordered handlers one at a time. Each must be fully joined before the next
-        # is signaled, so that the producer (collector) cannot enqueue into a stopped consumer (sender).
+        # Phase 1: dependency-ordered handlers -- stop+join each one fully before moving to the next.
         for name in ordered_thread_names:
-            thread_handler = handlers_by_name.pop(name, None)
-            if thread_handler is None:
+            handler = handlers_by_name.pop(name, None)
+            if handler is None:
                 continue
-            self._signal_and_join_thread(thread_handler)
+            self._stop_handler(handler)
+            self._wait_for_handler(handler)
 
-        # Phase 2: signal every remaining (independent) handler to stop. Broadcasting up-front lets them wind
-        # down concurrently rather than serializing the per-thread join timeout in phase 3.
+        # Phase 2 + 3: independent handlers -- broadcast stop() first, then join. Doing all stop() calls before
+        # any join() lets the threads wind down concurrently, instead of paying the join timeout one at a time.
         independent_handlers = list(handlers_by_name.values())
-        for thread_handler in independent_handlers:
-            try:
-                logger.info("Signaling {0} thread to stop...", thread_handler.get_thread_name())
-                thread_handler.signal_stop()
-            except Exception as e:
-                logger.warn(
-                    u"Exception signaling thread {0} to stop: {1}",
-                    thread_handler.get_thread_name(),
-                    ustr(e))
-
-        # Phase 3: wait for each independent handler to finish.
-        for thread_handler in independent_handlers:
-            self._join_thread(thread_handler)
+        for handler in independent_handlers:
+            self._stop_handler(handler)
+        for handler in independent_handlers:
+            self._wait_for_handler(handler)
 
         if not os.path.isfile(self._sentinel_file_path()):
             return
@@ -1185,38 +1176,33 @@ class UpdateHandler(object):
         return
 
     @staticmethod
-    def _signal_and_join_thread(thread_handler):
+    def _stop_handler(handler):
         """
-        Signals the given thread handler to stop and waits for it to finish (with a bounded timeout). Used for
-        dependency-ordered handlers, where the producer must fully exit before the consumer is signaled.
+        Signals the given handler to stop. Non-blocking; pair with _wait_for_handler() to wait for the
+        thread to actually exit.
         """
         try:
-            logger.info("Signaling {0} thread to stop...", thread_handler.get_thread_name())
-            thread_handler.signal_stop()
+            logger.info("Signaling {0} thread to stop...", handler.get_thread_name())
+            handler.stop()
         except Exception as e:
-            logger.warn(
-                u"Exception signaling thread {0} to stop: {1}",
-                thread_handler.get_thread_name(),
-                ustr(e))
-        UpdateHandler._join_thread(thread_handler)
+            logger.warn(u"Exception signaling thread {0} to stop: {1}", handler.get_thread_name(), ustr(e))
 
     @staticmethod
-    def _join_thread(thread_handler):
+    def _wait_for_handler(handler):
         """
-        Waits for the given thread handler to finish (with a bounded timeout) and logs the outcome. Assumes
-        signal_stop() has already been called on the handler. Calls stop() (which is the join entry point in
-        ThreadHandlerInterface and is idempotent with respect to a prior signal_stop()).
+        Waits for the given handler's thread to exit, with a bounded timeout, and logs the outcome.
+        Assumes _stop_handler() has already been called on the handler.
         """
-        thread_name = thread_handler.get_thread_name()
+        thread_name = handler.get_thread_name()
         try:
             logger.info("Waiting for {0} thread to stop...", thread_name)
-            thread_handler.stop()
-            if thread_handler.is_alive():
+            handler.join()
+            if handler.is_alive():
                 logger.warn("{0} thread did not stop within the timeout", thread_name)
             else:
                 logger.info("{0} thread stopped successfully", thread_name)
         except Exception as e:
-            logger.warn(u"Exception stopping thread {0}: {1}", thread_name, ustr(e))
+            logger.warn(u"Exception waiting for thread {0} to stop: {1}", thread_name, ustr(e))
 
     def _write_pid_file(self):
         pid_files = self._get_pid_files()
