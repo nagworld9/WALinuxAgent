@@ -130,9 +130,6 @@ class AgentGracefulShutdown(SelfUpdateBvt):
         self._verify_agent_updated_to_latest_version()
 
         log.info("Verifying the graceful-shutdown sequence in /var/log/waagent.log...")
-        # The shutdown sequence is logged by the original (custom) agent process before it exits, and the
-        # new (latest) agent process appends to the same /var/log/waagent.log after it starts. So we just
-        # read the current file; the shutdown lines for the original process are still present in it.
         self._verify_shutdown_sequence()
 
     def _verify_shutdown_sequence(self) -> None:
@@ -142,7 +139,7 @@ class AgentGracefulShutdown(SelfUpdateBvt):
             fail("Did not find the expected graceful-shutdown sequence in /var/log/waagent.log "
                  "after the agent self-upgraded. See the logs above for details.")
 
-        # The structural check passed; now verify the sequence completed within the bound
+        # Now verify the sequence completed within the bound
         # dictated by the per-thread join timeout.
         self._verify_shutdown_duration()
 
@@ -156,25 +153,20 @@ class AgentGracefulShutdown(SelfUpdateBvt):
         captured by _check_shutdown_sequence().
         """
         if self._first_signal_ts is None or self._last_terminal_ts is None:
-            fail("Internal: shutdown markers were present per _check_shutdown_sequence() but "
+            fail("Internal: shutdown markers were present but "
                  "AgentLogRecord.timestamp returned None for at least one of them.")
             return
 
         duration = (self._last_terminal_ts - self._first_signal_ts).total_seconds()
         log.info(
             "Shutdown duration: %.2fs (first signal=%s, last terminal=%s, bound=%ds).",
-            duration, self._first_signal_ts.isoformat(), self._last_terminal_ts.isoformat(),
+            duration, self._first_signal_ts, self._last_terminal_ts,
             _MAX_SHUTDOWN_DURATION_SECS)
 
         if duration > _MAX_SHUTDOWN_DURATION_SECS:
             fail(
-                "Graceful shutdown took {0:.2f}s, which exceeds the {1}s upper bound. "
-                "The bound is 3 * ThreadHandlerBase._THREAD_JOIN_TIMEOUT (={2}s) plus a "
-                "buffer for I/O and log latency; exceeding it indicates the per-thread join "
-                "timeout is being violated, or that shutdown is serializing operations that "
-                "should run in parallel.".format(
-                    duration, _MAX_SHUTDOWN_DURATION_SECS,
-                    ThreadHandlerBase._THREAD_JOIN_TIMEOUT))  # pylint: disable=protected-access
+                "Graceful shutdown took {0:.2f}s, which exceeds the {1}s upper bound of threads shutdown time".format(
+                    duration, _MAX_SHUTDOWN_DURATION_SECS))
 
     def _check_shutdown_sequence(self) -> bool:
         contents = self._ssh_client.run_command("cat /var/log/waagent.log", use_sudo=True)
