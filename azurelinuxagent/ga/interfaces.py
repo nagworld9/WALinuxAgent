@@ -133,13 +133,27 @@ class ThreadHandlerBase(object):
         """
         self._stop_event.set()
 
-    def join(self, timeout=_THREAD_JOIN_TIMEOUT):
+    def join(self, timeout=None):
         """
-        Waits up to 'timeout' seconds for the thread to exit. Returns once the thread has finished or the
-        timeout elapses; callers can use is_alive() afterwards to distinguish.
+        Waits up to 'timeout' seconds for the thread to exit. If 'timeout' is None (the default),
+        self._THREAD_JOIN_TIMEOUT is used; this is resolved at call time so that subclasses can
+        override _THREAD_JOIN_TIMEOUT as a class attribute and have the override honored here.
         """
+        if timeout is None:
+            timeout = self._THREAD_JOIN_TIMEOUT
         if self._thread is not None:
             try:
                 self._thread.join(timeout=timeout)
             except RuntimeError:
                 pass
+
+    def stop_and_join(self, timeout=None):
+        """
+        Convenience method: signals the thread to exit and waits for it to finish. Equivalent to:
+
+            handler.stop()
+            handler.join(timeout=timeout)
+        """
+        self.stop()
+        self.join(timeout=timeout)
+

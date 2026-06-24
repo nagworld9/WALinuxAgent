@@ -257,13 +257,10 @@ class EnvHandler(ThreadHandlerBase):
         self.hostname = None
 
     def run(self):
-        # If a previous worker thread is still alive, stop it
-        # cleanly before starting a new one. The two-step sequence (stop + join) matches the
-        # threading.Thread convention.
+        # If a previous worker thread is still alive, stop it cleanly before starting a new one.
         if self.is_alive():
             logger.info("Stop existing env monitor service.")
-            self.stop()
-            self.join()
+            self.stop_and_join()
         logger.info("Starting env monitor service.")
         self.start()
 

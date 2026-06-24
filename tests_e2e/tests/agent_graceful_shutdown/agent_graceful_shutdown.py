@@ -47,6 +47,7 @@ from azurelinuxagent.ga.interfaces import ThreadHandlerBase
 
 from tests_e2e.tests.agent_update.self_update import SelfUpdateBvt
 from tests_e2e.tests.lib.agent_log import AgentLog
+from tests_e2e.tests.lib.agent_test_context import AgentVmTestContext
 from tests_e2e.tests.lib.logging import log
 from tests_e2e.tests.lib.retry import retry_if_false
 
@@ -97,13 +98,15 @@ class AgentGracefulShutdown(SelfUpdateBvt):
     ext-handler exits via AgentUpgradeExitException (the self-update path).
     """
 
-    def run(self):
+    def __init__(self, context: AgentVmTestContext):
+        super().__init__(context)
         # Timestamps of the first "Signaling ... to stop" line and the last terminal line in the
         # shutdown sequence. Populated by _check_shutdown_sequence() on success and consumed by
         # _verify_shutdown_duration().
         self._first_signal_ts = None
         self._last_terminal_ts = None
 
+    def run(self):
         log.info("Setting up the VM with a custom older-version agent package...")
         # _test_setup() is provided by SelfUpdateBvt. It rotates /var/log/waagent.log, installs
         # the custom older-version pkg, and configures AutoUpdate.UpdateToLatestVersion=y so the
