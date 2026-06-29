@@ -26,7 +26,7 @@ from azurelinuxagent.common import logger
 from azurelinuxagent.ga.cgroupcontroller import MetricsCounter
 from azurelinuxagent.common.event import elapsed_milliseconds, add_event, WALAEventOperation
 from azurelinuxagent.common.future import ustr, UTC
-from azurelinuxagent.ga.interfaces import ThreadHandlerBase
+from azurelinuxagent.ga.thread_handler_base import ThreadHandlerBase
 from azurelinuxagent.ga.logcollector import COMPRESSED_ARCHIVE_PATH, GRACEFUL_KILL_ERRCODE
 from azurelinuxagent.ga.cgroupconfigurator import CGroupConfigurator, LOGCOLLECTOR_ANON_MEMORY_LIMIT_FOR_V1_AND_V2, LOGCOLLECTOR_CACHE_MEMORY_LIMIT_FOR_V1_AND_V2, LOGCOLLECTOR_MAX_THROTTLED_EVENTS_FOR_V2
 from azurelinuxagent.common.protocol.util import get_protocol_util

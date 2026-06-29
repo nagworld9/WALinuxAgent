@@ -43,7 +43,7 @@ from typing import Any, Dict, List
 
 from assertpy import fail
 
-from azurelinuxagent.ga.interfaces import ThreadHandlerBase
+from azurelinuxagent.ga.thread_handler_base import ThreadHandlerBase
 
 from tests_e2e.tests.agent_update.self_update import SelfUpdateBvt
 from tests_e2e.tests.lib.agent_log import AgentLog

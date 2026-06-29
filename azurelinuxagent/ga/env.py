@@ -29,7 +29,7 @@ from azurelinuxagent.common.event import WALAEventOperation, add_event
 from azurelinuxagent.common.future import UTC
 from azurelinuxagent.ga.firewall_manager import FirewallManager, FirewallStateError, IptablesInconsistencyError
 from azurelinuxagent.common.future import ustr
-from azurelinuxagent.ga.interfaces import ThreadHandlerBase
+from azurelinuxagent.ga.thread_handler_base import ThreadHandlerBase
 from azurelinuxagent.common.osutil import get_osutil
 from azurelinuxagent.common.utils import textutil
 from azurelinuxagent.common.protocol.util import get_protocol_util

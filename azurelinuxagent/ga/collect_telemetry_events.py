@@ -32,7 +32,7 @@ from azurelinuxagent.common.event import EVENTS_DIRECTORY, TELEMETRY_LOG_EVENT_I
 from azurelinuxagent.common.exception import InvalidExtensionEventError, ServiceStoppedError, EventError
 from azurelinuxagent.common.future import ustr, is_file_not_found_error, UTC
 from azurelinuxagent.common.utils.textutil import redact_sas_token
-from azurelinuxagent.ga.interfaces import ThreadHandlerBase
+from azurelinuxagent.ga.thread_handler_base import ThreadHandlerBase
 from azurelinuxagent.common.telemetryevent import TelemetryEvent, TelemetryEventParam, \
     GuestAgentGenericLogsSchema, GuestAgentExtensionEventsSchema
 from azurelinuxagent.common.utils import textutil

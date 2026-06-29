@@ -83,7 +83,7 @@ class ThreadHandlerBase(object):
 
     def daemon(self):
         """
-        The thread body. Subclasses MUST override this with their main loop.
+        The thread body. Subclasses MUST override this with their main logic.
         """
         raise NotImplementedError("daemon() not implemented")
 

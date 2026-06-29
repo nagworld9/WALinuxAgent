@@ -23,7 +23,7 @@ from azurelinuxagent.common import logger
 from azurelinuxagent.common.event import add_event, WALAEventOperation
 from azurelinuxagent.common.exception import ServiceStoppedError
 from azurelinuxagent.common.future import ustr, UTC, Queue, Empty
-from azurelinuxagent.ga.interfaces import ThreadHandlerBase
+from azurelinuxagent.ga.thread_handler_base import ThreadHandlerBase
 from azurelinuxagent.common.utils import textutil
 
 
