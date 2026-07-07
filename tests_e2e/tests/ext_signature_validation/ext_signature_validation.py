@@ -111,7 +111,13 @@ class ExtSignatureValidation(AgentVmTest):
         except Exception as error:
             # We exclude the extension name from regex because CRP sometimes installs test extensions with different
             # names (ex: Microsoft.Azure.Extensions.Edp.RunCommandHandlerLinuxTest instead of Microsoft.CPlat.Core.RunCommandHandlerLinux)
-            pattern = r".*Extension will not be processed: failed to run extension .* because policy specifies that extension must be signed, but extension package signature could not be found.*"
+            # The agent reports one of two messages depending on whether the extension is being newly installed
+            # ("extension package signature could not be found") or was previously installed without signature
+            # validation ("the installed extension's signature was not previously validated by the agent").
+            pattern = (
+                r".*Extension will not be processed: failed to run extension .* because policy specifies that extension must be signed, "
+                r"but (extension package signature could not be found|the installed extension's signature was not previously validated by the agent).*"
+            )
             assert_that(re.search(pattern, str(error))) \
                 .described_as(
                 f"Error message is expected to contain '{pattern}', but actual error message was '{error}'").is_not_none()
@@ -153,7 +159,8 @@ class ExtSignatureValidation(AgentVmTest):
 
             # Confirm that agent log contains error message that uninstall was blocked due to policy.
             # The script will check for a log message such as "Extension will not be processed: failed to uninstall
-            # extension 'Microsoft.Azure.Extensions.CustomScript' because policy specifies that extension must be signed, but extension package signature could not be found."
+            # extension 'Microsoft.Azure.Extensions.CustomScript' because policy specifies that extension must be signed,
+            # but the installed extension's signature was not validated by the agent."
             log.info("Checking agent log to confirm that delete operation failed due to signature policy.")
             self._ssh_client.run_command(f"ext_signature_validation-check_uninstall_blocked.py --extension-name '{extension_case.extension._identifier}' --after-timestamp '{delete_start_time}'", use_sudo=True)
 
@@ -472,13 +479,11 @@ class ExtSignatureValidation(AgentVmTest):
             self._should_fail_to_uninstall_extension(custom_script_unsigned)
 
         finally:
-            # Disable policy enforcement via conf and delete policy file
+            # Delete policy file
             log.info("")
             log.info("*** Begin test cleanup")
-            self._ssh_client.run_command("update-waagent-conf Debug.EnableExtensionPolicy=n", use_sudo=True)
             self._ssh_client.run_command("rm -f /etc/waagent_policy.json", use_sudo=True)
-            log.info(
-                "Successfully disabled policy via config (Debug.EnableExtensionPolicy=n) and removed policy file at /etc/waagent_policy.json")
+            log.info("Successfully removed policy file at /etc/waagent_policy.json")
             log.info("*** Test cleanup complete.")
 
     def get_ignore_error_rules(self) -> List[Dict[str, Any]]:

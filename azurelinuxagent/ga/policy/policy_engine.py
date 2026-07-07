@@ -26,6 +26,7 @@ from azurelinuxagent.common.exception import AgentError
 from azurelinuxagent.common.protocol.extensions_goal_state_from_vm_settings import _CaseFoldedDict
 from azurelinuxagent.common.utils.flexible_version import FlexibleVersion
 from azurelinuxagent.ga.confidential_vm_info import ConfidentialVMInfo
+from azurelinuxagent.ga.signature_validation_util import openssl_version_supported_for_signature_validation
 
 
 # Default policy values to be used when customer does not specify these attributes in the policy file.
@@ -61,11 +62,30 @@ class InvalidPolicyError(PolicyError):
 
 class ExtensionSignaturePolicyError(PolicyError):
     """
-    Error raised when policy requires signature, but extension is not signed and was not previously validated.
+    Base error raised when policy requires signature, but the extension is not signed or was not previously validated.
+    The policy engine raises this base type because it does not have context about the specific operation (install, enable,
+    upgrade, etc.). Callers of the policy engine are expected to catch this exception and translate it into one of the more
+    specific subclasses (ExtensionUnsignedError or ExtensionSignatureNotValidatedError) so that the appropriate message
+    can be reported.
     This error does not accept a message.
     """
     def __init__(self):
         super(ExtensionSignaturePolicyError, self).__init__()
+
+
+class ExtensionUnsignedError(ExtensionSignaturePolicyError):
+    """
+    Raised when policy requires a signature during install, but the extension is not signed.
+    This error does not accept a message.
+    """
+
+
+class ExtensionSignatureNotValidatedError(ExtensionSignaturePolicyError):
+    """
+    Raised when policy requires a signature for an already-installed extension whose signature was never validated by the agent
+    (e.g. the extension was installed before signature validation was enabled, or before policy enforcement was turned on).
+    This error does not accept a message.
+    """
 
 
 class ExtensionDisallowedError(PolicyError):
@@ -241,6 +261,7 @@ class _PolicyEngine(object):
         extension_policies = _PolicyEngine._get_dictionary(policy, attribute="extensionPolicies", optional=True, default={})
 
         _PolicyEngine._check_attributes(extension_policies, object_name="extensionPolicies", valid_attributes=["allowListedExtensionsOnly", "signatureRequired", "extensions"])
+        _PolicyEngine._validate_signature_required(extension_policies)
 
         return {
             "allowListedExtensionsOnly": _PolicyEngine._get_boolean(extension_policies, attribute="allowListedExtensionsOnly", name_prefix="extensionPolicies.", optional=True, default=_DEFAULT_ALLOW_LISTED_EXTENSIONS_ONLY),
@@ -273,6 +294,7 @@ class _PolicyEngine(object):
         extension_attribute_name = "extensionPolicies.extensions.{0}".format(extension)
 
         _PolicyEngine._check_attributes(extension, object_name=extension_attribute_name, valid_attributes=["signatureRequired", "runtimePolicy"])
+        _PolicyEngine._validate_signature_required(extension)
 
         return_value = {}
 
@@ -298,8 +320,23 @@ class _PolicyEngine(object):
             if k not in valid_attributes:
                 raise InvalidPolicyError("unrecognized attribute '{0}' in {1}".format(k, object_name))
 
-        if object_.get("signatureRequired") is True and not ConfidentialVMInfo.is_confidential_vm():
-            raise InvalidPolicyError("setting 'signatureRequired' to true is only supported on confidential virtual machines (CVMs).")
+    @staticmethod
+    def _validate_signature_required(object_):
+        """
+        Validates that 'signatureRequired' can be set to true.
+        Raises InvalidPolicyError if signatureRequired is true but the system does not support signature validation.
+        """
+        if object_.get("signatureRequired") is True:
+            # Signature validation is currently only supported on CVMs. If a non-CVM user creates a policy with
+            # signatureRequired=true, reject the policy at parse time.
+            # TODO: Remove once signature validation is supported on all VMs.
+            if not ConfidentialVMInfo.is_confidential_vm():
+                raise InvalidPolicyError("setting 'signatureRequired' to true is only supported on confidential virtual machines (CVMs).")
+            # Signature validation requires OpenSSL >= 1.1.0. If the system OpenSSL is too old, reject the policy at
+            # parse time.
+            # TODO: Remove once signature validation no longer depends on the 'no_check_time' flag.
+            if not openssl_version_supported_for_signature_validation():
+                raise InvalidPolicyError("setting 'signatureRequired' to true requires OpenSSL >= 1.1.0; the OpenSSL version on this system does not support signature validation.")
 
     @staticmethod
     def _get_dictionary(object_, attribute, name_prefix="", optional=False, default=None):
@@ -358,7 +395,7 @@ class ExtensionPolicyEngine(_PolicyEngine):
         Return whether we should allow extension download based on policy.
         If policy feature not enabled, return True.
         If allowListedExtensionsOnly=true, return true only if extension present in "extensions" allowlist.
-        If allowListedExtensions=false, return true always.
+        If allowListedExtensionsOnly=false, return true always.
         """
         if not self._policy_enforcement_enabled:
             return True
@@ -390,7 +427,9 @@ class ExtensionPolicyEngine(_PolicyEngine):
         :param extension_name: extension name (string).
         :param extension_is_signed: Boolean indicating whether the extension is signed (or signature was previously validated, if extension is not being installed).
         :raises ExtensionDisallowedError: If the extension is not allowed by policy.
-        :raises ExtensionSignaturePolicyError: If the extension is required to be signed but is not.
+        :raises ExtensionSignaturePolicyError: If the extension is required to be signed but is not. The caller is expected to
+            translate this into one of the more specific subclasses (ExtensionUnsignedError or ExtensionSignatureNotValidatedError)
+            so that the appropriate message can be reported.
         """
         if not self._policy_enforcement_enabled:
             return
@@ -399,10 +438,8 @@ class ExtensionPolicyEngine(_PolicyEngine):
         if not extension_allowed:
             raise ExtensionDisallowedError()      # Caller sets message and error code, based on requested extension operation
 
-        # TODO: Differentiate error handling:
-        #   (1) New installation: extension is unsigned -> raise ExtensionUnsignedError
-        #   (2) Existing installation: signature was never validated -> raise ExtensionSignatureNotValidatedError
-        # Currently both cases raise the same error. They should use distinct exceptions/messages.
+        # Raises the generic ExtensionSignaturePolicyError; the caller has the context to translate this into a more
+        # specific exception (ExtensionUnsignedError vs. ExtensionSignatureNotValidatedError) for clearer diagnostics.
         enforce_signature = self.should_enforce_signature_validation(extension_name)
         if enforce_signature and not extension_is_signed:
             raise ExtensionSignaturePolicyError() # Caller sets message and error code, based on requested extension operation
