@@ -67,6 +67,10 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
         for line in dmesg_output.strip().split('\n'):
             monitor._parse_and_aggregate_soft_lockup_events(line)
 
+    @staticmethod
+    def _format_dmesg_line(timestamp, message):
+        return "[{0:12.6f}] {1}".format(timestamp, message)
+
     # -- Regex ---------------------------------------------------------------
 
     def test_soft_lockup_regex_should_match_and_extract_groups(self):
@@ -103,7 +107,7 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
 
     def test_parse_should_skip_events_before_watermark(self):
         monitor = self._create_monitor()
-        monitor._last_processed_timestamp = 12346.0
+        monitor._parse_baseline_timestamp = 12346.0
         self._feed_dmesg(monitor, self.SAMPLE_DMESG_WITH_LOCKUPS)
 
         self.assertEqual(monitor._event_aggregates[0]["count"], 1,
@@ -119,6 +123,65 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
                          "No aggregates should be produced when dmesg has no lockup lines")
         self.assertAlmostEqual(monitor._last_processed_timestamp, 12347.345678, places=4,
                                msg="Watermark should advance even when no lockup events are present")
+
+    def test_parse_should_capture_bounded_log_context_starting_at_representative_lockup(self):
+        monitor = self._create_monitor()
+        context_lines = MonitorKernelSoftLockup._MAX_CONTEXT_LINES_PER_TRACE
+        dmesg_lines = [self._format_dmesg_line(200.0, "BUG: soft lockup - CPU#0 stuck for 22s! [test:1]")]
+        for index in range(context_lines + 5):
+            dmesg_lines.append(self._format_dmesg_line(201.0 + index, "after-{0}".format(index)))
+
+        self._feed_dmesg(monitor, "\n".join(dmesg_lines))
+
+        log_context = monitor._get_kernel_stack_traces()[0]["logLines"]
+        self.assertEqual(len(log_context), context_lines,
+                         "Log context should be capped at the per-trace line limit")
+        self.assertIn("BUG: soft lockup", log_context[0],
+                      "Log context should start at the soft lockup line")
+        self.assertIn("after-{0}".format(context_lines - 2), log_context[-1],
+                      "Log context should include the following dmesg lines up to the limit")
+
+    def test_parse_should_capture_lines_that_share_a_kernel_timestamp(self):
+        monitor = self._create_monitor()
+        self._feed_dmesg(monitor, "\n".join([
+            self._format_dmesg_line(200.0, "BUG: soft lockup - CPU#0 stuck for 22s! [test:1]"),
+            self._format_dmesg_line(200.0, "Modules linked in: mod_a mod_b"),
+            self._format_dmesg_line(200.0, "RIP: 0010:some_func+0x10/0x20"),
+        ]))
+
+        log_context = monitor._get_kernel_stack_traces()[0]["logLines"]
+        self.assertEqual(len(log_context), 3,
+                 "Context lines sharing a kernel timestamp should all be captured, not skipped")
+
+    def test_parse_should_capture_repeated_lockup_contexts_on_same_cpu_when_slots_are_available(self):
+        monitor = self._create_monitor()
+        self._feed_dmesg(monitor, "\n".join([
+            self._format_dmesg_line(200.0, "BUG: soft lockup - CPU#0 stuck for 22s! [test:1]"),
+            self._format_dmesg_line(203.0, "BUG: soft lockup - CPU#0 stuck for 33s! [test:2]"),
+        ]))
+
+        traces = monitor._get_kernel_stack_traces()
+        self.assertEqual(len(traces), 2,
+                 "Repeated lockups on the same CPU should each capture a stack trace while slots remain")
+        self.assertIn("stuck for 22s", traces[0]["logLines"][0],
+                 "The first trace should start at the first lockup line")
+        self.assertIn("stuck for 33s", traces[1]["logLines"][0],
+                 "The second trace should start at the second lockup line")
+
+    def test_parse_should_prefer_distinct_cpu_stack_traces_over_duplicate_cpu_candidates(self):
+        monitor = self._create_monitor()
+        max_traces = MonitorKernelSoftLockup._MAX_STACK_TRACES
+        dmesg_lines = [self._format_dmesg_line(200.0 + index, "BUG: soft lockup - CPU#0 stuck for 22s! [test:{0}]".format(index))
+                       for index in range(max_traces)]
+        dmesg_lines.append(self._format_dmesg_line(300.0, "BUG: soft lockup - CPU#1 stuck for 23s! [distinct]"))
+
+        self._feed_dmesg(monitor, "\n".join(dmesg_lines))
+
+        captured_cpu_ids = [trace["cpuId"] for trace in monitor._get_kernel_stack_traces()]
+        self.assertEqual(len(captured_cpu_ids), max_traces,
+                 "Stack trace telemetry should remain capped at the configured trace count")
+        self.assertEqual(captured_cpu_ids.count(1), 1,
+                 "A later distinct CPU should evict a duplicate same-CPU trace and appear exactly once")
 
     # -- Report events -------------------------------------------------------
 
@@ -151,8 +214,28 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
                              "First cpuDetails count should match the aggregated count for CPU#0")
             self.assertEqual(payload["cpuDetails"][0]["maxStuckTimeSec"], 23,
                              "First cpuDetails maxStuckTimeSec should match the aggregated max for CPU#0")
+            self.assertNotIn("logLines", payload["cpuDetails"][0],
+                             "Stack traces should be reported separately from aggregate CPU details")
 
         self.assertEqual(len(monitor._event_aggregates), 0, "Aggregates should be cleared after reporting")
+
+    def test_report_should_include_kernel_stack_traces_separately_when_available(self):
+        monitor = self._create_monitor()
+        monitor._event_aggregates = {0: {"count": 1, "max_stuck_seconds": 22, "last_timestamp": 12345.0}}
+        stack_trace = {
+            "cpuId": 0,
+            "logLines": ["[12345.000000] BUG: soft lockup - CPU#0 stuck for 22s!"]
+        }
+        monitor._stack_traces = [stack_trace]
+
+        with patch("azurelinuxagent.ga.kernel_event_monitor.add_event") as mock_add_event:
+            monitor._report_events()
+
+        payload = json.loads(self._get_soft_lockup_events(mock_add_event)[0]["message"])
+        self.assertNotIn("logLines", payload["cpuDetails"][0],
+                         "Aggregate CPU details should not include stack trace context")
+        self.assertEqual(payload["kernelStackTraces"], [stack_trace],
+                         "Stack traces should be reported separately with cpu and bounded log context")
 
     def test_report_should_clear_aggregates_even_on_failure(self):
         monitor = self._create_monitor()
