@@ -203,7 +203,7 @@ images:
    debian_10: "Debian:debian-10:10:latest"
    debian_11: "Debian:debian-11:11:latest"
    debian_11_arm64:
-      urn: "Debian:debian-11:11-backports-arm64:latest"
+      urn: "Debian:debian-11:11-backports-arm64-v2:latest"
       vm_sizes:
          # See comment above wrt VM sizes for ARM64 machines
          - "Standard_B2pls_v2"
