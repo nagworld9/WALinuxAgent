@@ -107,7 +107,7 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
 
     def test_parse_should_skip_events_before_watermark(self):
         monitor = self._create_monitor()
-        monitor._parse_baseline_timestamp = 12346.0
+        monitor._curr_scan_baseline_timestamp = 12346.0
         self._feed_dmesg(monitor, self.SAMPLE_DMESG_WITH_LOCKUPS)
 
         self.assertEqual(monitor._event_aggregates[0]["count"], 1,
@@ -124,7 +124,7 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
         self.assertAlmostEqual(monitor._last_processed_timestamp, 12347.345678, places=4,
                                msg="Watermark should advance even when no lockup events are present")
 
-    def test_parse_should_capture_bounded_log_context_starting_at_representative_lockup(self):
+    def test_parse_should_capture_bounded_log_context_starting_at_the_lockup_line(self):
         monitor = self._create_monitor()
         context_lines = MonitorKernelSoftLockup._MAX_CONTEXT_LINES_PER_TRACE
         dmesg_lines = [self._format_dmesg_line(200.0, "BUG: soft lockup - CPU#0 stuck for 22s! [test:1]")]
@@ -174,14 +174,75 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
         dmesg_lines = [self._format_dmesg_line(200.0 + index, "BUG: soft lockup - CPU#0 stuck for 22s! [test:{0}]".format(index))
                        for index in range(max_traces)]
         dmesg_lines.append(self._format_dmesg_line(300.0, "BUG: soft lockup - CPU#1 stuck for 23s! [distinct]"))
+        dmesg_lines.append(self._format_dmesg_line(400.0, "BUG: soft lockup - CPU#0 stuck for 24s! [repeat]"))
 
         self._feed_dmesg(monitor, "\n".join(dmesg_lines))
 
-        captured_cpu_ids = [trace["cpuId"] for trace in monitor._get_kernel_stack_traces()]
-        self.assertEqual(len(captured_cpu_ids), max_traces,
-                 "Stack trace telemetry should remain capped at the configured trace count")
-        self.assertEqual(captured_cpu_ids.count(1), 1,
-                 "A later distinct CPU should evict a duplicate same-CPU trace and appear exactly once")
+        traces = monitor._get_kernel_stack_traces()
+        expected_markers = ["[test:{0}]".format(index) for index in range(max_traces - 1)] + ["[distinct]"]
+        self.assertEqual([trace["logLines"][0].split()[-1] for trace in traces], expected_markers,
+                 "A distinct CPU should evict the newest same-CPU trace, while a CPU already captured is dropped")
+        self.assertEqual(monitor._stack_traces_bytes,
+                 sum(len(line) for trace in traces for line in trace["logLines"]),
+                 "Evicting a trace should release the size budget it was holding")
+
+    def test_parse_should_truncate_rather_than_leave_gaps_when_size_capped(self):
+        monitor = self._create_monitor()
+        monitor._MAX_STACK_TRACES_BYTES = 1500
+
+        dmesg_lines = [self._format_dmesg_line(200.0, "BUG: soft lockup - CPU#0 stuck for 22s! [test]")]
+        timestamp = 201.0
+        for index in range(20):
+            # Alternate long and short lines: a long line that does not fit must stop the capture
+            # instead of being skipped in favour of the short line that follows it.
+            dmesg_lines.append(self._format_dmesg_line(
+                timestamp, "line-{0} {1}".format(index, "x" * (900 if index % 2 == 0 else 10))))
+            timestamp += 1.0
+
+        self._feed_dmesg(monitor, "\n".join(dmesg_lines))
+
+        captured_lines = monitor._get_kernel_stack_traces()[0]["logLines"]
+        self.assertLess(len(captured_lines), len(dmesg_lines),
+                 "The byte budget should have truncated the trace for this test to be meaningful")
+        self.assertEqual(captured_lines, dmesg_lines[:len(captured_lines)],
+                 "A size-capped trace should be truncated, never missing lines from the middle")
+
+    def test_parse_should_not_start_a_trace_without_size_budget(self):
+        monitor = self._create_monitor()
+        monitor._MAX_STACK_TRACES_BYTES = 1500
+
+        dmesg_lines = [self._format_dmesg_line(200.0, "BUG: soft lockup - CPU#0 stuck for 22s! [test]")]
+        timestamp = 201.0
+        for _ in range(20):
+            dmesg_lines.append(self._format_dmesg_line(timestamp, "x" * 300))
+            timestamp += 1.0
+        dmesg_lines.append(self._format_dmesg_line(
+            timestamp, "BUG: soft lockup - CPU#1 stuck for 22s! [test] {0}".format("y" * 300)))
+
+        self._feed_dmesg(monitor, "\n".join(dmesg_lines))
+
+        self.assertEqual(len(monitor._get_kernel_stack_traces()), 1,
+                 "A lockup on a new CPU should not start a trace once the size budget is exhausted")
+
+        # Same guard once the trace list is full: the budget freed by evicting a repeat CPU still has to fit the new line.
+        monitor = self._create_monitor()
+        monitor._MAX_STACK_TRACES_BYTES = 1500
+        max_traces = MonitorKernelSoftLockup._MAX_STACK_TRACES
+
+        dmesg_lines = [self._format_dmesg_line(200.0 + index, "BUG: soft lockup - CPU#0 stuck for 22s! [test]")
+                       for index in range(max_traces)]
+        dmesg_lines.append(self._format_dmesg_line(
+            300.0, "BUG: soft lockup - CPU#9 stuck for 22s! [distinct] {0}".format("y" * 1350)))
+
+        self._feed_dmesg(monitor, "\n".join(dmesg_lines))
+
+        traces = monitor._get_kernel_stack_traces()
+        self.assertEqual(len(traces), max_traces,
+                 "The trace list should be full for this part of the test to be meaningful")
+        self.assertNotIn(9, [trace["cpuId"] for trace in traces],
+                 "A distinct CPU should not evict a trace when the freed budget still cannot fit its line")
+        self.assertLessEqual(monitor._stack_traces_bytes, monitor._MAX_STACK_TRACES_BYTES,
+                 "Evicting to make room should never push the captured size over the budget")
 
     # -- Report events -------------------------------------------------------
 
@@ -221,12 +282,8 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
 
     def test_report_should_include_kernel_stack_traces_separately_when_available(self):
         monitor = self._create_monitor()
-        monitor._event_aggregates = {0: {"count": 1, "max_stuck_seconds": 22, "last_timestamp": 12345.0}}
-        stack_trace = {
-            "cpuId": 0,
-            "logLines": ["[12345.000000] BUG: soft lockup - CPU#0 stuck for 22s!"]
-        }
-        monitor._stack_traces = [stack_trace]
+        lockup_line = self._format_dmesg_line(12345.0, "BUG: soft lockup - CPU#0 stuck for 22s!")
+        self._feed_dmesg(monitor, lockup_line)
 
         with patch("azurelinuxagent.ga.kernel_event_monitor.add_event") as mock_add_event:
             monitor._report_events()
@@ -234,8 +291,22 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
         payload = json.loads(self._get_soft_lockup_events(mock_add_event)[0]["message"])
         self.assertNotIn("logLines", payload["cpuDetails"][0],
                          "Aggregate CPU details should not include stack trace context")
-        self.assertEqual(payload["kernelStackTraces"], [stack_trace],
-                         "Stack traces should be reported separately with cpu and bounded log context")
+        self.assertEqual(payload["kernelStackTraces"], [{"cpuId": 0, "logLines": [lockup_line]}],
+                         "Reported stack traces should carry the cpu id and captured log lines, and nothing else")
+
+    def test_report_should_clear_stack_traces_and_release_size_budget(self):
+        monitor = self._create_monitor()
+        self._feed_dmesg(monitor, self.SAMPLE_DMESG_WITH_LOCKUPS)
+        self.assertGreater(monitor._stack_traces_bytes, 0,
+                 "The sample dmesg should have captured stack traces for this test to be meaningful")
+
+        with patch("azurelinuxagent.ga.kernel_event_monitor.add_event"):
+            monitor._report_events()
+
+        self.assertEqual(monitor._get_kernel_stack_traces(), [],
+                         "Stack traces should be cleared after reporting so they are not sent again")
+        self.assertEqual(monitor._stack_traces_bytes, 0,
+                         "The size budget should be released after reporting, otherwise it shrinks every cycle")
 
     def test_report_should_clear_aggregates_even_on_failure(self):
         monitor = self._create_monitor()
