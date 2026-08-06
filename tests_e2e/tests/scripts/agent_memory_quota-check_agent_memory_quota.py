@@ -26,11 +26,13 @@ from azurelinuxagent.common.future import UTC
 from azurelinuxagent.common.osutil import systemd
 from azurelinuxagent.common.utils import shellutil
 from tests_e2e.tests.lib.agent_log import AgentLog
-from tests_e2e.tests.lib.cgroup_helpers import check_log_message, get_agent_memory_quota, using_cgroupv2
+from tests_e2e.tests.lib.cgroup_helpers import check_log_message, get_agent_memory_quota, using_cgroupv2, \
+    verify_controllers_available
 
 from tests_e2e.tests.lib.logging import log
 from tests_e2e.tests.lib.remote_test import run_remote_test
 from tests_e2e.tests.lib.retry import retry_if_false
+from tests_e2e.tests.lib.test_result import TestSkipped
 
 
 def skip_if_distro_not_supports_memory_quota():
@@ -38,6 +40,15 @@ def skip_if_distro_not_supports_memory_quota():
         log.info("Skipping  memory quota test as the distro is not using cgroupv2")
         cleanup_test_setup()
         sys.exit(0)
+
+
+def skip_if_memory_controller_is_not_enabled():
+    found: bool = retry_if_false(lambda: verify_controllers_available(["memory"]), delay=120)
+    if not found:
+        cleanup_test_setup()
+        raise TestSkipped("The distro does not have Memory controller enabled. Skipping the test.")
+
+    log.info("Verified memory controller mounted on the system")
 
 
 def prepare_agent():
@@ -162,6 +173,7 @@ def cleanup_test_setup():
 
 def main():
     skip_if_distro_not_supports_memory_quota()
+    skip_if_memory_controller_is_not_enabled()
     prepare_agent()
     verify_agent_has_no_memory_quota_set()
     verify_agent_reported_memory_metrics()

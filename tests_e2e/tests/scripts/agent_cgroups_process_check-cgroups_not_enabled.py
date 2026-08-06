@@ -34,13 +34,22 @@ def restart_ext_handler():
 
 def verify_agent_cgroups_not_enabled():
     """
-    Verifies that the agent cgroups not enabled when ama extension(unexpected) processes are found in the agent cgroup
+    Verifies that the agent cgroups not enabled when (unexpected) processes
+    are found in the agent cgroup.
     """
     log.info("Verifying agent cgroups are not enabled")
 
-    ama_process_found: bool = retry_if_false(lambda: check_log_message("The agent's cgroup includes unexpected processes:.+/var/lib/waagent/Microsoft.Azure.Monitor"))
-    if not ama_process_found:
-        fail("Agent failed to found ama extension processes in the agent cgroup")
+    dummy_pid = None
+    try:
+        with open("/var/lib/waagent/tmp/dummy_proc.pid") as fh:
+            dummy_pid = fh.read().strip()
+    except Exception as e:
+        fail("Could not read process PID file: {0}".format(e))
+
+    dummy_process_found: bool = retry_if_false(lambda: check_log_message(
+        "The agent's cgroup includes unexpected processes:.+PID: {0}".format(dummy_pid)))
+    if not dummy_process_found:
+        fail("Agent failed to find dummy extension-spawned process (pid={0}) in the agent cgroup".format(dummy_pid))
 
     found: bool = retry_if_false(lambda: check_log_message("Found unexpected processes in the agent cgroup before agent enable cgroups"))
     if not found:
@@ -49,7 +58,6 @@ def verify_agent_cgroups_not_enabled():
     disabled: bool = retry_if_false(check_agent_quota_disabled)
     if not disabled:
         fail("The agent failed to disable its CPUQuota when cgroups were not enabled. Current CPUQuota: {0}".format(get_agent_cpu_quota()))
-
 
 
 def main():

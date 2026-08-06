@@ -53,10 +53,15 @@ image-sets:
    # As of today agent only support and enabled resource governance feature on following distros
    cgroups-endorsed:
       - "azure-linux_3"
+      - "azure-linux_4"
       - "centos_82"
+      - "oracle_95"
+      - "oracle_10"
       - "rhel_83"
       - "rhel_95"
       - "rhel_95_arm64"
+      - "rhel_10"
+      - "suse_15"
       - "ubuntu_1604"
       - "ubuntu_1804"
       - "ubuntu_2004"
@@ -78,10 +83,15 @@ image-sets:
    # These are the distros which have periodic log collector support.
    log-collector-endorsed:
       - "azure-linux_3"
+      - "azure-linux_4"
       - "centos_82"
+      - "oracle_95"
+      - "oracle_10"
       - "rhel_83"
       - "rhel_810"
       - "rhel_95"
+      - "rhel_10"
+      - "suse_15"
       - "ubuntu_1604"
       - "ubuntu_1804"
       - "ubuntu_2004"
