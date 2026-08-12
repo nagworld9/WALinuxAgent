@@ -19,6 +19,7 @@
 
 import os
 import re
+import sys
 
 from assertpy import fail
 
@@ -30,7 +31,7 @@ from tests_e2e.tests.lib.cgroup_helpers import verify_if_distro_supports_cgroup,
     print_cgroups, get_mounted_controller_list, using_cgroupv2, verify_controllers_available
 from tests_e2e.tests.lib.logging import log
 from tests_e2e.tests.lib.retry import retry_if_false
-from tests_e2e.tests.lib.test_result import TestSkipped
+from tests_e2e.tests.lib.test_result import TestSkipped, RemoteTestExitCode
 
 CUSTOM_SCRIPT_EXTENSION_PATH = \
     "/azure.slice/azure-vmextensions.slice/azure-vmextensions-Microsoft.Azure.Extensions.CustomScript"
@@ -43,13 +44,12 @@ def skip_if_controllers_not_mounted():
     This method checks if the controllers are mounted on the system. If not, it skips the test.
     """
     log.info("===== Verifying if cgroup controllers are mounted on the system")
-    found: bool = retry_if_false(lambda: verify_controllers_available(["cpu"]), delay=60)
-    if not found:
-        found: bool = retry_if_false(lambda: verify_controllers_available(["memory"]), delay=60)
-        if not found:
-            raise TestSkipped("The distro does not have CPU or Memory controller enabled. Skipping the test.")
+    cpu_enabled: bool = retry_if_false(lambda: verify_controllers_available(["cpu"]), delay=60)
+    memory_enabled: bool = retry_if_false(lambda: verify_controllers_available(["memory"]), delay=60)
+    if not cpu_enabled and not memory_enabled:
+        raise TestSkipped("The distro does not have CPU or Memory controller enabled. Skipping the test.")
 
-    log.info("Verified cpu and memory controllers are mounted on the system")
+    log.info("Verified controller availability (cpu=%s, memory=%s)", cpu_enabled, memory_enabled)
 
 
 def verify_custom_script_cgroup_assigned_correctly():
@@ -252,5 +252,6 @@ except Exception as e:
         log.info("Cgroup is disabled due to systemd error while invoking the extension, ignoring ext cgroups validations")
     elif isinstance(e, TestSkipped):
         log.info("Test skipped: %s", e)
+        sys.exit(RemoteTestExitCode.SKIP)
     else:
         raise

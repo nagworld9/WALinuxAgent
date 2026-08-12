@@ -34,7 +34,7 @@ def restart_ext_handler():
 
 def verify_agent_cgroups_not_enabled():
     """
-    Verifies that the agent cgroups not enabled when (unexpected) processes
+    Verifies that the agent cgroups are not enabled when (unexpected) processes
     are found in the agent cgroup.
     """
     log.info("Verifying agent cgroups are not enabled")
@@ -53,7 +53,7 @@ def verify_agent_cgroups_not_enabled():
 
     found: bool = retry_if_false(lambda: check_log_message("Found unexpected processes in the agent cgroup before agent enable cgroups"))
     if not found:
-        fail("Agent failed to found unknown processes in the agent cgroup")
+        fail("Agent failed to found unknown processes are in the agent cgroup")
 
     disabled: bool = retry_if_false(check_agent_quota_disabled)
     if not disabled:

@@ -35,8 +35,7 @@ class InstallExtensions:
 
     def run(self) -> None:
         """
-        Installs the extensions used to validate cgroups and returns the list of
-        extensions that were actually installed.
+        Installs the extensions used to validate cgroups
         """
 
         # Install the GATest extension to test service cgroups
