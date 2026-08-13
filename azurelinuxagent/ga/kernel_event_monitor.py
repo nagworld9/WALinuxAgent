@@ -197,14 +197,13 @@ class MonitorKernelSoftLockup(PeriodicOperation):
 
     def _append_line_to_stack_traces(self, line):
         for trace in self._stack_traces:
-            if trace["remaining_after_lines"] <= 0:
+            if trace["closed"] or len(trace["logLines"]) >= self._MAX_CONTEXT_LINES_PER_TRACE:
                 continue
             # Out of byte budget: end this trace instead of only skipping the line.
             if self._stack_traces_bytes + len(line) > self._MAX_STACK_TRACES_BYTES:
-                trace["remaining_after_lines"] = 0
+                trace["closed"] = True
                 continue
             trace["logLines"].append(line)
-            trace["remaining_after_lines"] -= 1
             self._stack_traces_bytes += len(line)
 
     def _index_of_last_repeat_cpu_trace(self):
@@ -239,7 +238,7 @@ class MonitorKernelSoftLockup(PeriodicOperation):
         self._stack_traces.append({
             "cpuId": cpu_id,
             "logLines": [line],
-            "remaining_after_lines": self._MAX_CONTEXT_LINES_PER_TRACE - 1
+            "closed": False
         })
         self._stack_traces_bytes += len(line)
 

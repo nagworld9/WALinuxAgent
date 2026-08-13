@@ -207,7 +207,7 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
         self.assertEqual(captured_lines, dmesg_lines[:len(captured_lines)],
                  "A size-capped trace should be truncated, never missing lines from the middle")
 
-    def test_parse_should_not_start_a_trace_without_size_budget(self):
+    def test_parse_should_not_start_a_trace_when_size_budget_is_exhausted(self):
         monitor = self._create_monitor()
         monitor._MAX_STACK_TRACES_BYTES = 1500
 
@@ -224,7 +224,7 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
         self.assertEqual(len(monitor._get_kernel_stack_traces()), 1,
                  "A lockup on a new CPU should not start a trace once the size budget is exhausted")
 
-        # Same guard once the trace list is full: the budget freed by evicting a repeat CPU still has to fit the new line.
+    def test_parse_should_not_evict_an_existing_trace_when_new_trace_exceeds_size_budget(self):
         monitor = self._create_monitor()
         monitor._MAX_STACK_TRACES_BYTES = 1500
         max_traces = MonitorKernelSoftLockup._MAX_STACK_TRACES
@@ -238,7 +238,7 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
 
         traces = monitor._get_kernel_stack_traces()
         self.assertEqual(len(traces), max_traces,
-                 "The trace list should be full for this part of the test to be meaningful")
+                 "The trace list should be full for this test to be meaningful")
         self.assertNotIn(9, [trace["cpuId"] for trace in traces],
                  "A distinct CPU should not evict a trace when the freed budget still cannot fit its line")
         self.assertLessEqual(monitor._stack_traces_bytes, monitor._MAX_STACK_TRACES_BYTES,
@@ -308,17 +308,19 @@ class TestMonitorKernelSoftLockup(AgentTestCase):
         self.assertEqual(monitor._stack_traces_bytes, 0,
                          "The size budget should be released after reporting, otherwise it shrinks every cycle")
 
-    def test_report_should_clear_aggregates_even_on_failure(self):
+    def test_report_should_clear_state_even_on_failure(self):
         monitor = self._create_monitor()
-        monitor._event_aggregates = {
-            0: {"count": 1, "max_stuck_seconds": 22, "last_timestamp": 12345.0},
-        }
+        self._feed_dmesg(monitor, self.SAMPLE_DMESG_WITH_LOCKUPS)
 
         with patch("azurelinuxagent.ga.kernel_event_monitor.add_event", side_effect=Exception("send failed")):
             monitor._report_events()
 
         self.assertEqual(len(monitor._event_aggregates), 0,
                          "Aggregates should be cleared even when telemetry sending raises an exception")
+        self.assertEqual(len(monitor._stack_traces), 0,
+                         "Stack traces should be cleared even when telemetry sending raises an exception")
+        self.assertEqual(monitor._stack_traces_bytes, 0,
+                         "The size budget should be released even when telemetry sending raises an exception")
 
     def test_report_should_not_send_if_no_events(self):
         monitor = self._create_monitor()
