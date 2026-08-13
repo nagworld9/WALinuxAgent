@@ -58,6 +58,8 @@ def verify_custom_script_cgroup_assigned_correctly():
     """
     log.info("===== Verifying custom script was assigned to the correct cgroups")
 
+    # CSE creates this folder to save the output of cgroup information where the CSE script was executed. Since CSE process exits after execution,
+    # and cgroup paths gets cleaned up by the system, so this information saved at run time when the extension executed.
     check_temporary_folder_exists()
 
     cpu_mounted = False
@@ -142,6 +144,9 @@ def verify_ext_cgroup_controllers_created_on_file_system():
     verified_controllers_path = []
 
     for controller in get_mounted_controller_list():
+        # cgroup_mount_path is similar to /azure.slice/walinuxagent.service
+        # cgroup_mount_path[1:] = azure.slice/walinuxagent.service
+        # expected extension_service_controller_path similar to /sys/fs/cgroup/cpu/azure.slice/walinuxagent.service
         controller_path = os.path.join(BASE_CGROUP, controller)
         if not os.path.exists(controller_path):
             all_controllers_present = False
@@ -203,6 +208,10 @@ def verify_ext_cgroups_tracked():
     cgroup_tracked_pattern_re = re.compile(CGROUP_TRACKED_PATTERN)
 
     for record in AgentLog().read():
+
+        # Cgroup tracking logged as
+        # 2021-11-14T13:09:59.351961Z INFO ExtHandler ExtHandler Started cpu tracking cgroup Microsoft.Azure.Extensions.Edp.GATestExtGo-1.0.0.2
+        # [/sys/fs/cgroup/cpu,cpuacct/azure.slice/azure-vmextensions.slice/azure-vmextensions-Microsoft.Azure.Extensions.Edp.GATestExtGo_1.0.0.2.slice]
         cgroup_tracked_match = cgroup_tracked_pattern_re.findall(record.message)
         if len(cgroup_tracked_match) != 0:
             name, path = cgroup_tracked_match[0][1], cgroup_tracked_match[0][2]

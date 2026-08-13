@@ -54,7 +54,7 @@ class _MockedFileSystemTestCase(AgentTestCase):
 
 
 class CGroupUtilTestCase(AgentTestCase):
-    def test_cgroups_should_be_supported_only_on_ubuntu16plus_centos8_redhat8_rhel9_azurelinux3_chainguard(self):
+    def test_cgroups_should_be_supported_only_on_ubuntu16plus_centos8_redhat8_rhel9plus_azurelinux3plus_oracle95plus_sles156plus_chainguard(self):
         test_cases = [
             (['ubuntu', '16.04', 'xenial'], True),
             (['ubuntu', '16.10', 'yakkety'], True),
