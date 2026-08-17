@@ -19,12 +19,12 @@ from datetime import datetime, timedelta
 from azurelinuxagent.common.future import UTC
 from azurelinuxagent.common.utils import timeutil
 from azurelinuxagent.ga.agent_memory_restart_history import (
-    RestartHistory,
+    AgentMemoryRestartHistory,
     HISTORY_FILE_NAME,
     SCHEMA_VERSION,
     MAX_VERSIONS_RETAINED,
 )
-from tests.lib.tools import AgentTestCase
+from tests.lib.tools import AgentTestCase, patch
 
 
 VERSION = "2.13.1.1"
@@ -33,7 +33,7 @@ OTHER_VERSION = "2.13.1.2"
 
 class RestartHistoryTestCase(AgentTestCase):
     """
-    Unit tests for azurelinuxagent.ga.agent_memory_restart_history.RestartHistory.
+    Unit tests for azurelinuxagent.ga.agent_memory_restart_history.AgentMemoryRestartHistory.
     """
 
     def setUp(self):
@@ -41,7 +41,7 @@ class RestartHistoryTestCase(AgentTestCase):
         self.history_path = os.path.join(self.tmp_dir, HISTORY_FILE_NAME)
 
     def _new(self):
-        return RestartHistory(path=self.history_path)
+        return AgentMemoryRestartHistory(path=self.history_path)
 
     @staticmethod
     def _ts(dt):
@@ -63,8 +63,8 @@ class RestartHistoryTestCase(AgentTestCase):
 
     def test_missing_file_starts_empty(self):
         hist = self._new()
-        self.assertEqual([], hist.restarts_for(VERSION))
-        self.assertIsNone(hist.last_restart_time(VERSION))
+        self.assertEqual([], hist.get_version_restarts(VERSION))
+        self.assertIsNone(hist.get_version_latest_restart_time(VERSION))
         self.assertFalse(os.path.exists(self.history_path),
                          "Just constructing the object must not create the file")
 
@@ -72,7 +72,7 @@ class RestartHistoryTestCase(AgentTestCase):
         now = datetime.now(UTC)
         self._seed({VERSION: [(now - timedelta(days=1), 400 * 1024 * 1024)]})
         hist = self._new()
-        entries = hist.restarts_for(VERSION)
+        entries = hist.get_version_restarts(VERSION)
         self.assertEqual(1, len(entries))
         self.assertEqual(400 * 1024 * 1024, entries[0]["anon_bytes"])
 
@@ -80,7 +80,7 @@ class RestartHistoryTestCase(AgentTestCase):
         with open(self.history_path, "w") as f:
             f.write("{not valid json")
         hist = self._new()
-        self.assertEqual([], hist.restarts_for(VERSION),
+        self.assertEqual([], hist.get_version_restarts(VERSION),
                          "State must fall back to empty when the file is corrupt")
         self.assertTrue(os.path.exists(self.history_path + ".corrupt"),
                         "The corrupt file must be renamed with a .corrupt suffix")
@@ -90,13 +90,13 @@ class RestartHistoryTestCase(AgentTestCase):
         with open(self.history_path, "w") as f:
             json.dump(["not", "a", "dict"], f)
         hist = self._new()
-        self.assertEqual([], hist.restarts_for(VERSION))
+        self.assertEqual([], hist.get_version_restarts(VERSION))
 
     def test_load_ignores_versions_key_of_wrong_type(self):
         with open(self.history_path, "w") as f:
             json.dump({"schema_version": SCHEMA_VERSION, "versions": ["oops"]}, f)
         hist = self._new()
-        self.assertEqual([], hist.restarts_for(VERSION))
+        self.assertEqual([], hist.get_version_restarts(VERSION))
 
     def test_record_restart_creates_file_with_expected_schema(self):
         hist = self._new()
@@ -120,7 +120,7 @@ class RestartHistoryTestCase(AgentTestCase):
         hist = self._new()
         hist.record_restart(VERSION, 1)
         hist.record_restart(VERSION, 2)
-        entries = self._new().restarts_for(VERSION)
+        entries = self._new().get_version_restarts(VERSION)
         self.assertEqual([1, 2], [e["anon_bytes"] for e in entries])
 
     def test_record_restart_isolates_versions(self):
@@ -128,46 +128,47 @@ class RestartHistoryTestCase(AgentTestCase):
         hist.record_restart(VERSION, 1)
         hist.record_restart(OTHER_VERSION, 2)
         reloaded = self._new()
-        self.assertEqual(1, len(reloaded.restarts_for(VERSION)))
-        self.assertEqual(1, len(reloaded.restarts_for(OTHER_VERSION)))
+        self.assertEqual(1, len(reloaded.get_version_restarts(VERSION)))
+        self.assertEqual(1, len(reloaded.get_version_restarts(OTHER_VERSION)))
 
     def test_record_restart_accepts_non_string_version(self):
-        # RestartHistory keys by str(version) so callers can pass FlexibleVersion.
+        # AgentMemoryRestartHistory keys by str(version) so callers can pass FlexibleVersion.
         hist = self._new()
         hist.record_restart(2, 1)
-        self.assertEqual(1, len(self._new().restarts_for("2")))
+        self.assertEqual(1, len(self._new().get_version_restarts("2")))
 
     def test_record_restart_coerces_anon_bytes_to_int(self):
         hist = self._new()
         hist.record_restart(VERSION, 3.7)
-        self.assertEqual(3, self._new().restarts_for(VERSION)[0]["anon_bytes"])
+        self.assertEqual(3, self._new().get_version_restarts(VERSION)[0]["anon_bytes"])
 
     def test_history_survives_across_instances(self):
         first = self._new()
         first.record_restart(VERSION, 500)
         second = self._new()
-        self.assertEqual([500], [e["anon_bytes"] for e in second.restarts_for(VERSION)])
+        self.assertEqual([500], [e["anon_bytes"] for e in second.get_version_restarts(VERSION)])
 
-    def test_last_restart_time_none_when_no_entries(self):
-        self.assertIsNone(self._new().last_restart_time(VERSION))
+    def test_get_version_latest_restart_time_none_when_no_entries(self):
+        self.assertIsNone(self._new().get_version_latest_restart_time(VERSION))
 
-    def test_last_restart_time_returns_latest(self):
+    def test_get_version_latest_restart_time_returns_latest(self):
         old = datetime.now(UTC) - timedelta(days=10)
         mid = datetime.now(UTC) - timedelta(days=5)
         new = datetime.now(UTC) - timedelta(days=1)
         # Intentionally seed out of chronological order to verify max() logic.
         self._seed({VERSION: [(mid, 1), (old, 2), (new, 3)]})
-        last = self._new().last_restart_time(VERSION)
+        last = self._new().get_version_latest_restart_time(VERSION)
         self.assertIsNotNone(last)
         # Compare at second precision to avoid microsecond flakes from round-trip.
         self.assertEqual(new.replace(microsecond=0), last.replace(microsecond=0))
 
-    def test_last_restart_time_returns_none_when_timestamps_unparseable(self):
-        # Directly write a file with a bogus timestamp string.
+    def test_get_version_latest_restart_time_raises_when_timestamps_unparseable(self):
+        # An unparseable timestamp must propagate rather than silently return
+        # None; otherwise a corrupt history could allow unbounded self-restarts.
         with open(self.history_path, "w") as f:
             json.dump({"schema_version": SCHEMA_VERSION,
                        "versions": {VERSION: [{"timestamp": "not-a-time", "anon_bytes": 1}]}}, f)
-        self.assertIsNone(self._new().last_restart_time(VERSION))
+        self.assertRaises(ValueError, self._new().get_version_latest_restart_time, VERSION)
 
     def test_can_restart_allowed_when_history_empty(self):
         allowed, reason = self._new().can_restart(VERSION, max_per_version=5,
@@ -217,24 +218,26 @@ class RestartHistoryTestCase(AgentTestCase):
         self.assertTrue(allowed)
 
     def test_record_restart_prunes_to_max_versions_retained(self):
-        # Pre-seed with more than MAX_VERSIONS_RETAINED versions.
-        old_ts = datetime.now(UTC) - timedelta(days=100)
+        # Pre-seed with more than MAX_VERSIONS_RETAINED versions, each with a
+        # distinct last-restart timestamp so the pruning order is deterministic.
+        now = datetime.now(UTC)
         seeded = {
-            "2.10.0.0": [(old_ts, 1)],
-            "2.11.0.0": [(old_ts, 1)],
-            "2.12.0.0": [(old_ts, 1)],
-            "2.13.0.0": [(old_ts, 1)],
+            "2.10.0.0": [(now - timedelta(days=40), 1)],
+            "2.11.0.0": [(now - timedelta(days=30), 1)],
+            "2.12.0.0": [(now - timedelta(days=20), 1)],
+            "2.13.0.0": [(now - timedelta(days=10), 1)],
         }
         self._seed(seeded)
         hist = self._new()
-        # Recording a newer version should trigger pruning to the newest N.
+        # Recording a new version stamps it with 'now', so it will be retained
+        # along with the two most-recently-active seeded versions.
         hist.record_restart("2.14.0.0", 42)
 
         kept = set(self._new()._data["versions"].keys())
         self.assertEqual(MAX_VERSIONS_RETAINED, len(kept),
                          "History must be pruned to exactly MAX_VERSIONS_RETAINED entries")
-        # The N highest versions are the ones retained.
-        self.assertEqual(set(["2.14.0.0", "2.13.0.0", "2.12.0.0"]), kept)
+        self.assertEqual(set(["2.14.0.0", "2.13.0.0", "2.12.0.0"]), kept,
+                         "The N versions with the most recent restarts must be retained")
 
     def test_record_restart_does_not_prune_when_under_limit(self):
         old_ts = datetime.now(UTC) - timedelta(days=100)
@@ -246,9 +249,11 @@ class RestartHistoryTestCase(AgentTestCase):
         self.assertEqual(set(["2.10.0.0", "2.11.0.0", "2.12.0.0"]), kept,
                          "Nothing should be pruned when count <= MAX_VERSIONS_RETAINED")
 
-    def test_prune_keeps_higher_versions_regardless_of_timestamp(self):
-        # Older versions have very recent timestamps; newer versions have very
-        # old timestamps. Pruning must still be driven by version, not by time.
+    def test_prune_keeps_recently_active_versions_even_when_version_is_older(self):
+        # Downgrade scenario: newer versions were active long ago; the
+        # currently-running (older) version has fresh activity. It must be
+        # retained because pruning is driven by last-active timestamp, not by
+        # version number.
         very_recent = datetime.now(UTC) - timedelta(seconds=1)
         very_old = datetime.now(UTC) - timedelta(days=365)
         self._seed({
@@ -258,36 +263,44 @@ class RestartHistoryTestCase(AgentTestCase):
             "2.15.0.0": [(very_old, 1)],
         })
         hist = self._new()
-        hist.record_restart("2.16.0.0", 1)
+        # Record another restart on an old version - it becomes the freshest.
+        hist.record_restart("2.10.0.0", 1)
         kept = set(self._new()._data["versions"].keys())
-        self.assertEqual(set(["2.16.0.0", "2.15.0.0", "2.14.0.0"]), kept)
-
-    def test_prune_drops_unparseable_versions_first(self):
-        old_ts = datetime.now(UTC) - timedelta(days=1)
-        self._seed({
-            "not-a-version": [(old_ts, 1)],
-            "another-bad-key": [(old_ts, 1)],
-            "2.13.0.0": [(old_ts, 1)],
-            "2.14.0.0": [(old_ts, 1)],
-        })
-        hist = self._new()
-        hist.record_restart("2.15.0.0", 1)
-        kept = set(self._new()._data["versions"].keys())
-        self.assertEqual(set(["2.15.0.0", "2.14.0.0", "2.13.0.0"]), kept,
-                         "Unparseable version keys must be pruned before parseable ones")
+        self.assertEqual(set(["2.10.0.0", "2.11.0.0", "2.14.0.0"]), kept,
+                         "Older versions with newer activity must beat newer versions with older activity")
 
     def test_prune_preserves_entries_of_retained_versions(self):
-        old_ts = datetime.now(UTC) - timedelta(days=10)
+        # Use distinct timestamps so that 2.13/2.14/2.15 are the retained set.
+        now = datetime.now(UTC)
         self._seed({
-            "2.10.0.0": [(old_ts, 1)],
-            "2.11.0.0": [(old_ts, 1)],
-            "2.13.0.0": [(old_ts, 11), (old_ts, 22)],
-            "2.14.0.0": [(old_ts, 33)],
+            "2.10.0.0": [(now - timedelta(days=40), 1)],
+            "2.11.0.0": [(now - timedelta(days=30), 1)],
+            "2.13.0.0": [(now - timedelta(days=20), 11), (now - timedelta(days=15), 22)],
+            "2.14.0.0": [(now - timedelta(days=10), 33)],
         })
         hist = self._new()
         hist.record_restart("2.15.0.0", 44)
         reloaded = self._new()
         # Historical entries of retained versions must be preserved intact.
-        self.assertEqual([11, 22], [e["anon_bytes"] for e in reloaded.restarts_for("2.13.0.0")])
-        self.assertEqual([33], [e["anon_bytes"] for e in reloaded.restarts_for("2.14.0.0")])
-        self.assertEqual([44], [e["anon_bytes"] for e in reloaded.restarts_for("2.15.0.0")])
+        self.assertEqual([11, 22], [e["anon_bytes"] for e in reloaded.get_version_restarts("2.13.0.0")])
+        self.assertEqual([33], [e["anon_bytes"] for e in reloaded.get_version_restarts("2.14.0.0")])
+        self.assertEqual([44], [e["anon_bytes"] for e in reloaded.get_version_restarts("2.15.0.0")])
+
+    def test_record_restart_reraises_when_save_fails(self):
+        # A save failure must propagate so callers can abort the restart; otherwise
+        # the agent could self-restart on every cycle, bypassing the guardrails.
+        hist = self._new()
+        with patch("azurelinuxagent.ga.agent_memory_restart_history.os.rename",
+                   side_effect=IOError("disk full")):
+            self.assertRaises(IOError, hist.record_restart, VERSION, 123)
+
+        # Nothing must have been persisted, and the tmp file must be cleaned up.
+        self.assertFalse(os.path.exists(self.history_path),
+                         "History file must not be created when save fails")
+        self.assertFalse(os.path.exists(self.history_path + ".tmp"),
+                         "Temporary file must be cleaned up on save failure")
+        # A fresh instance sees an empty history, so guardrails still block correctly.
+        self.assertEqual([], self._new().get_version_restarts(VERSION))
+
+
+

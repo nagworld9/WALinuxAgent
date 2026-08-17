@@ -1,4 +1,3 @@
-
 # Windows Azure Linux Agent
 #
 # Copyright 2018 Microsoft Corporation
@@ -39,7 +38,7 @@ from azurelinuxagent.common.agent_supported_feature import get_supported_feature
     get_agent_supported_features_list_for_crp
 from azurelinuxagent.common.utils.restutil import KNOWN_WIRESERVER_IP
 from azurelinuxagent.ga.cgroupconfigurator import CGroupConfigurator
-from azurelinuxagent.ga.agent_memory_restart_history import RestartHistory
+from azurelinuxagent.ga.agent_memory_restart_history import AgentMemoryRestartHistory
 from azurelinuxagent.common.event import add_event, initialize_event_logger_vminfo_common_parameters_and_protocol, \
     WALAEventOperation, EVENTS_DIRECTORY
 from azurelinuxagent.common.exception import ExitException, AgentUpgradeExitException, AgentMemoryExceededException
@@ -79,6 +78,19 @@ CHILD_POLL_INTERVAL = 60
 
 AGENT_MEMORY_REPORT_PERIOD = timedelta(hours=12)
 AGENT_MEMORY_REPORT_MAX_EVENTS = 5
+
+
+class AgentMemoryEventCategory(object):
+    """
+    Categories for AgentMemory telemetry/log emissions. Each category has its
+    own independent quota inside the AGENT_MEMORY_REPORT_PERIOD window (see
+    UpdateHandler._report_agent_memory_event).
+    """
+    BREACH = "breach"        # anon memory over quota on this sample
+    RESET = "reset"          # counter reset after going back under quota
+    SKIP = "skip"            # breach threshold hit but a guardrail blocked restart
+    EXCEPTION = "exception"  # unexpected failure inside the memory-check path
+
 
 GOAL_STATE_PERIOD_EXTENSIONS_DISABLED = 5 * 60
 
@@ -1257,23 +1269,23 @@ class UpdateHandler(object):
             self._heartbeat_update_goal_state_error_count = 0
             self._last_telemetry_heartbeat = datetime.now(UTC)
 
-    def _report_agent_memory(self, kind, message, success=True):
+    def _report_agent_memory_event(self, category, message, success=True):
         """
         Emit an AgentMemory log line + telemetry event, throttled to at most
         AGENT_MEMORY_REPORT_MAX_EVENTS emissions per AGENT_MEMORY_REPORT_PERIOD
-        rolling window per `kind`. `kind` is a short string identifying the
-        class of message (e.g. "breach", "skip", "reset") so different classes
-        do not consume each other's quota.
+        rolling window per `category`. `category` is one of the
+        AgentMemoryEventCategory values so different classes of message
+        (breach, reset, skip, exception) do not consume each other's quota.
         """
         now_utc = datetime.now(UTC)
         window_start = now_utc - AGENT_MEMORY_REPORT_PERIOD
-        # Drop timestamps that fall outside the current rolling window.
-        recent = [t for t in self._agent_memory_last_report_time.get(kind, []) if t > window_start]
+        # Drop timestamps that fall outside of the current rolling window.
+        recent = [t for t in self._agent_memory_last_report_time.get(category, []) if t > window_start]
         if len(recent) >= AGENT_MEMORY_REPORT_MAX_EVENTS:
-            self._agent_memory_last_report_time[kind] = recent[-AGENT_MEMORY_REPORT_MAX_EVENTS:]
+            self._agent_memory_last_report_time[category] = recent
             return
         recent.append(now_utc)
-        self._agent_memory_last_report_time[kind] = recent
+        self._agent_memory_last_report_time[category] = recent
         if success:
             logger.info(message)
             add_event(AGENT_NAME, op=WALAEventOperation.AgentMemory, message=message)
@@ -1284,7 +1296,7 @@ class UpdateHandler(object):
     def _check_agent_memory_usage(self):
         """
         Checks the agent's current anonymous memory usage at the end of each goal state
-        processing cycle. If the anon usage exceeds Debug.AgentAgentMemoryQuota for
+        processing cycle. If the anon usage exceeds Debug.AgentAnonMemoryQuota for
         Debug.AgentMemoryConsecutiveBreachCount consecutive cycles, the agent
         exits so that the daemon can restart it -- subject to two guardrails
         persisted across restarts in agent_memory_restart_history.json:
@@ -1324,8 +1336,8 @@ class UpdateHandler(object):
                 CGroupConfigurator.get_instance().check_agent_memory_usage()
                 # Under threshold -> reset consecutive-breach counter.
                 if self._agent_memory_consecutive_breaches != 0:
-                    self._report_agent_memory(
-                        "reset",
+                    self._report_agent_memory_event(
+                        AgentMemoryEventCategory.RESET,
                         "Agent anon memory back under quota; resetting consecutive breach counter (was {0}).".format(
                             self._agent_memory_consecutive_breaches))
                     self._agent_memory_consecutive_breaches = 0
@@ -1333,24 +1345,24 @@ class UpdateHandler(object):
             except AgentMemoryExceededException as exception:
                 self._agent_memory_consecutive_breaches += 1
                 required = conf.get_agent_memory_consecutive_breach_count()
-                self._report_agent_memory(
-                    "breach",
+                self._report_agent_memory_event(
+                    AgentMemoryEventCategory.BREACH,
                     "Agent anon memory breach {0}/{1}: {2}".format(
                         self._agent_memory_consecutive_breaches, required, ustr(exception)))
                 if self._agent_memory_consecutive_breaches < required:
                     return
 
                 # Consecutive-breach threshold reached; check guardrails.
-                anon_bytes = getattr(exception, "anon_bytes", 0)
+                anon_bytes = exception.anon_bytes
 
-                history = RestartHistory()
+                history = AgentMemoryRestartHistory()
                 allowed, reason = history.can_restart(
                     CURRENT_VERSION,
                     conf.get_agent_memory_max_restarts_per_version(),
                     conf.get_agent_memory_min_restart_interval_seconds())
                 if not allowed:
-                    self._report_agent_memory(
-                        "skip",
+                    self._report_agent_memory_event(
+                        AgentMemoryEventCategory.SKIP,
                         "Agent anon memory breach threshold reached but self-restart skipped: {0}".format(reason))
                     # Reset so we don't re-evaluate every cycle; guardrails will
                     # continue to block until the interval elapses anyway.
@@ -1365,8 +1377,9 @@ class UpdateHandler(object):
         except ExitException:  # pylint: disable=try-except-raise
             raise
         except Exception as exception:
-            self._report_agent_memory(
-                "exception",
+            self._agent_memory_consecutive_breaches = 0
+            self._report_agent_memory_event(
+                AgentMemoryEventCategory.EXCEPTION,
                 "Error checking the agent's memory usage: {0}".format(ustr(exception)), success=False)
 
     @staticmethod

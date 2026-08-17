@@ -2794,7 +2794,7 @@ class AgentMemoryCheckTestCase(AgentTestCase):
         with self._mock_enabled():
             with patch("azurelinuxagent.ga.cgroupconfigurator.CGroupConfigurator._Impl.check_agent_memory_usage",
                        side_effect=self._breach_exception(anon_bytes=anon)):
-                with patch("azurelinuxagent.ga.update.RestartHistory") as MockHistory:
+                with patch("azurelinuxagent.ga.update.AgentMemoryRestartHistory") as MockHistory:
                     history_instance = MockHistory.return_value
                     history_instance.can_restart.return_value = (True, "allowed")
 
@@ -2826,7 +2826,7 @@ class AgentMemoryCheckTestCase(AgentTestCase):
         with self._mock_enabled():
             with patch("azurelinuxagent.ga.cgroupconfigurator.CGroupConfigurator._Impl.check_agent_memory_usage",
                        side_effect=self._breach_exception()):
-                with patch("azurelinuxagent.ga.update.RestartHistory") as MockHistory:
+                with patch("azurelinuxagent.ga.update.AgentMemoryRestartHistory") as MockHistory:
                     history_instance = MockHistory.return_value
                     history_instance.can_restart.return_value = (False, "max restarts (5) reached for version X")
 
@@ -2849,7 +2849,7 @@ class AgentMemoryCheckTestCase(AgentTestCase):
         with self._mock_enabled():
             with patch("azurelinuxagent.ga.cgroupconfigurator.CGroupConfigurator._Impl.check_agent_memory_usage",
                        side_effect=self._breach_exception()):
-                with patch("azurelinuxagent.ga.update.RestartHistory") as MockHistory:
+                with patch("azurelinuxagent.ga.update.AgentMemoryRestartHistory") as MockHistory:
                     history_instance = MockHistory.return_value
                     history_instance.can_restart.return_value = (False, "last restart 0:05:00 ago is within min interval 3 days, 0:00:00")
 
