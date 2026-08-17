@@ -1356,7 +1356,7 @@ class UpdateHandler(object):
                 anon_bytes = exception.anon_bytes
 
                 history = AgentMemoryRestartHistory()
-                allowed, reason = history.can_restart(
+                allowed, reason = history.version_can_restart(
                     CURRENT_VERSION,
                     conf.get_agent_memory_max_restarts_per_version(),
                     conf.get_agent_memory_min_restart_interval_seconds())

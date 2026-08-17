@@ -171,7 +171,7 @@ class RestartHistoryTestCase(AgentTestCase):
         self.assertRaises(ValueError, self._new().get_version_latest_restart_time, VERSION)
 
     def test_can_restart_allowed_when_history_empty(self):
-        allowed, reason = self._new().can_restart(VERSION, max_per_version=5,
+        allowed, reason = self._new().version_can_restart(VERSION, max_per_version=5,
                                                   min_interval_seconds=3 * 86400)
         self.assertTrue(allowed)
         self.assertEqual("allowed", reason)
@@ -179,7 +179,7 @@ class RestartHistoryTestCase(AgentTestCase):
     def test_can_restart_blocked_when_max_per_version_reached(self):
         long_ago = datetime.now(UTC) - timedelta(days=30)
         self._seed({VERSION: [(long_ago, 1)] * 5})
-        allowed, reason = self._new().can_restart(VERSION, max_per_version=5,
+        allowed, reason = self._new().version_can_restart(VERSION, max_per_version=5,
                                                   min_interval_seconds=3 * 86400)
         self.assertFalse(allowed)
         self.assertIn("max restarts", reason)
@@ -187,7 +187,7 @@ class RestartHistoryTestCase(AgentTestCase):
     def test_can_restart_blocked_within_min_interval(self):
         recent = datetime.now(UTC) - timedelta(hours=1)
         self._seed({VERSION: [(recent, 1)]})
-        allowed, reason = self._new().can_restart(VERSION, max_per_version=5,
+        allowed, reason = self._new().version_can_restart(VERSION, max_per_version=5,
                                                   min_interval_seconds=3 * 86400)
         self.assertFalse(allowed)
         self.assertIn("within min interval", reason)
@@ -195,7 +195,7 @@ class RestartHistoryTestCase(AgentTestCase):
     def test_can_restart_allowed_after_min_interval(self):
         far_past = datetime.now(UTC) - timedelta(days=5)
         self._seed({VERSION: [(far_past, 1)]})
-        allowed, _ = self._new().can_restart(VERSION, max_per_version=5,
+        allowed, _ = self._new().version_can_restart(VERSION, max_per_version=5,
                                              min_interval_seconds=3 * 86400)
         self.assertTrue(allowed)
 
@@ -203,7 +203,7 @@ class RestartHistoryTestCase(AgentTestCase):
         # A "future" timestamp (clock rolled back) must NOT bypass the min-interval.
         future = datetime.now(UTC) + timedelta(days=1)
         self._seed({VERSION: [(future, 1)]})
-        allowed, reason = self._new().can_restart(VERSION, max_per_version=5,
+        allowed, reason = self._new().version_can_restart(VERSION, max_per_version=5,
                                                   min_interval_seconds=60)
         self.assertFalse(allowed,
                          "A future last-restart timestamp must not be treated as 'long ago'")
@@ -213,7 +213,7 @@ class RestartHistoryTestCase(AgentTestCase):
         # Fill up VERSION but leave OTHER_VERSION empty. OTHER_VERSION must still be allowed.
         long_ago = datetime.now(UTC) - timedelta(days=30)
         self._seed({VERSION: [(long_ago, 1)] * 5})
-        allowed, _ = self._new().can_restart(OTHER_VERSION, max_per_version=5,
+        allowed, _ = self._new().version_can_restart(OTHER_VERSION, max_per_version=5,
                                              min_interval_seconds=3 * 86400)
         self.assertTrue(allowed)
 
@@ -255,12 +255,13 @@ class RestartHistoryTestCase(AgentTestCase):
         # retained because pruning is driven by last-active timestamp, not by
         # version number.
         very_recent = datetime.now(UTC) - timedelta(seconds=1)
-        very_old = datetime.now(UTC) - timedelta(days=365)
+        very_old_newer = datetime.now(UTC) - timedelta(days=365)
+        very_old_older = datetime.now(UTC) - timedelta(days=400)
         self._seed({
             "2.10.0.0": [(very_recent, 1)],
             "2.11.0.0": [(very_recent, 1)],
-            "2.14.0.0": [(very_old, 1)],
-            "2.15.0.0": [(very_old, 1)],
+            "2.14.0.0": [(very_old_newer, 1)],
+            "2.15.0.0": [(very_old_older, 1)],
         })
         hist = self._new()
         # Record another restart on an old version - it becomes the freshest.

@@ -109,7 +109,7 @@ class AgentMemoryRestartHistory(object):
         ]
         return max(parsed)
 
-    def can_restart(self, version, max_per_version, min_interval_seconds):
+    def version_can_restart(self, version, max_per_version, min_interval_seconds):
         """
         Returns (allowed: bool, reason: str).
 

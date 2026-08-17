@@ -2796,7 +2796,7 @@ class AgentMemoryCheckTestCase(AgentTestCase):
                        side_effect=self._breach_exception(anon_bytes=anon)):
                 with patch("azurelinuxagent.ga.update.AgentMemoryRestartHistory") as MockHistory:
                     history_instance = MockHistory.return_value
-                    history_instance.can_restart.return_value = (True, "allowed")
+                    history_instance.version_can_restart.return_value = (True, "allowed")
 
                     update_handler = self._mock_update_handler()
 
@@ -2828,7 +2828,7 @@ class AgentMemoryCheckTestCase(AgentTestCase):
                        side_effect=self._breach_exception()):
                 with patch("azurelinuxagent.ga.update.AgentMemoryRestartHistory") as MockHistory:
                     history_instance = MockHistory.return_value
-                    history_instance.can_restart.return_value = (False, "max restarts (5) reached for version X")
+                    history_instance.version_can_restart.return_value = (False, "max restarts (5) reached for version X")
 
                     update_handler = self._mock_update_handler()
                     # Drive three consecutive breaches.
@@ -2851,7 +2851,7 @@ class AgentMemoryCheckTestCase(AgentTestCase):
                        side_effect=self._breach_exception()):
                 with patch("azurelinuxagent.ga.update.AgentMemoryRestartHistory") as MockHistory:
                     history_instance = MockHistory.return_value
-                    history_instance.can_restart.return_value = (False, "last restart 0:05:00 ago is within min interval 3 days, 0:00:00")
+                    history_instance.version_can_restart.return_value = (False, "last restart 0:05:00 ago is within min interval 3 days, 0:00:00")
 
                     with patch("azurelinuxagent.ga.update.add_event") as patch_add_event:
                         update_handler = self._mock_update_handler()
