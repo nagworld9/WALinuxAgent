@@ -3,7 +3,7 @@
 # cryptographic algorithms used by the Extensions pipeline (e.g. encryption of protected settings, creation of PFX packages, and communication
 # Agent<->Wireserver) are FIPS approved.
 #
-# This test suite focuses on FIPS 140-3 and uses Ubuntu 22 and RHEL 9 as the representative distros for this feature. Note that Azure Linux 3
+# This test suite focuses on FIPS 140-3 and uses Ubuntu 22/24 and RHEL 9 as the representative distros for this feature. Note that Azure Linux 3
 # is also FIPS 140-3 compliant, but, similarly to Windows, it takes a more permissive approach and deprecated cryptographic algorithms can still
 # be used. We do not include Azure Linux 3 in the images here, it is already included in the "endorsed" image set and runs as part of the other
 # test suites.
@@ -12,29 +12,36 @@ name: "FIPS"
 tests:
   - source: "fips/fips.py"
 images:
-  - "ubuntu_pro_2204" # Enabling FIPS on Ubuntu requires the "pro" client to be enabled; it is pre-enabled on these "pro" images.
-  - "ubuntu_pro_fips_2204" # FIPS is pre-enabled on these "fips" images.
+  - "ubuntu_pro_fips_2204"        # FIPS is pre-enabled on these "fips" images.
+  - "ubuntu_pro_2404"             # Enabling FIPS on Ubuntu requires the "pro" client to be enabled. There is not an Ubuntu 24 image which comes with FIPS pre-enabled, since it is not certified for FIPS yet, but we can enable FIPS manually on these pro VMs.
+  - "ubuntu_pro_fips_2204_china"  # China cloud has different urns for ubuntu pro images, so we include those here as well.
+  - "ubuntu_pro_2404_china"       # China cloud has different urns for ubuntu pro images, so we include those here as well.
   - "oracle_95"
   - "rhel_95"
 
 #
-# The test uses a keyvault located on westus2.
+# The test uses keyvaults in each of our test subscriptions. Those keyvaults are located in AzureCloud:westus2,
+# AzureUSGovernment:usgovarizona, and AzureChinaCloud:chinanorth2
 #
 locations:
   - "AzureCloud:westus2"
+  - "AzureUSGovernment:usgovarizona"
+  - "AzureChinaCloud:chinanorth2"
 
 #
-# Support for FIPS 140-3 has not been deployed AzureChinaCloud.
-#
-skip_on_clouds:
-  - "AzureChinaCloud"
-
-#
-# The Ubuntu images required by the test are not available on AzureUSGovernment
+# The oracle_95 and rhel_95 images are not available in China cloud, so we skip the suite on those images.
+# Additionally, there are two different urns for each Ubuntu Pro image because different clouds have different urns. We
+#   skip the images that are not available in each cloud.
 #
 skip_on_images:
-  - "AzureUSGovernment:ubuntu_pro_2204"
-  - "AzureUSGovernment:ubuntu_pro_fips_2204"
+  - "AzureChinaCloud:oracle_95"
+  - "AzureChinaCloud:rhel_95"
+  - "AzureChinaCloud:ubuntu_pro_fips_2204"
+  - "AzureChinaCloud:ubuntu_pro_2404"
+  - "AzureCloud:ubuntu_pro_fips_2204_china"
+  - "AzureCloud:ubuntu_pro_2404_china"
+  - "AzureUSGovernment:ubuntu_pro_fips_2204_china"
+  - "AzureUSGovernment:ubuntu_pro_2404_china"
 
 #
 # The test VM could be shared with other test suites, but we want to ensure there is a mix of FIPS and non-FIPS environments in the test run,

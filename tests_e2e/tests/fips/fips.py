@@ -46,8 +46,8 @@ class Fips(AgentVmTest):
         self._opt_in_to_fips()
         log.info("")
 
-        if self._distro.startswith("ubuntu_22"):
-            self._enable_fips_on_ubuntu_22()
+        if self._distro.startswith("ubuntu_22") or self._distro.startswith("ubuntu_24"):
+            self._enable_fips_on_ubuntu()
         elif Fips._is_red_hat_distro(self._distro):
             self._enable_fips_on_red_hat_distro()
         else:
@@ -131,11 +131,11 @@ class Fips(AgentVmTest):
         """
         return distro in ("rhel_95", "oracle_95")
 
-    def _enable_fips_on_ubuntu_22(self) -> None:
+    def _enable_fips_on_ubuntu(self) -> None:
         #
         # See https://ubuntu.com/tutorials/using-the-ubuntu-pro-client-to-enable-fips#4-enabling-fips-crypto-modules
         #
-        log.info("Enabling FIPS on Ubuntu 22...")
+        log.info("Enabling FIPS on Ubuntu...")
 
         # Skip this if FIPS is already enabled
         is_enabled_command = "test -f {0} && test $(cat {0}) = 1 && echo yes || true".format("/proc/sys/crypto/fips_enabled")
@@ -153,7 +153,7 @@ class Fips(AgentVmTest):
 
         enabled = self._ssh_client.run_command(is_enabled_command).rstrip()
         if enabled != "yes":
-            raise Exception("Failed to enable FIPS on Ubuntu 22; aborting test!!!!")
+            raise Exception("Failed to enable FIPS on Ubuntu; aborting test!!!!")
         log.info("FIPS was enabled successfully.")
 
     def _enable_fips_on_red_hat_distro(self) -> None:
@@ -209,6 +209,10 @@ class Fips(AgentVmTest):
                     'source_vault': f"/subscriptions/{self._context.vm.subscription}/resourceGroups/waagent-tests/providers/Microsoft.KeyVault/vaults/waagenttests",
                     'certificate_url': 'https://waagenttests.vault.usgovcloudapi.net/secrets/rsa-cert/100dd15190f2485fa200ab948afc1d2e'
                 },
+                'AzureChinaCloud': {
+                    'source_vault': f"/subscriptions/{self._context.vm.subscription}/resourceGroups/waagent-tests/providers/Microsoft.KeyVault/vaults/waagenttests",
+                    'certificate_url': 'https://waagenttests.vault.azure.cn/secrets/rsa-cert/a1a6047c02d84d2da5300fec70b0d070'
+                }
             }
             certificate = certificates_by_cloud[self._context.vm.cloud]
 
