@@ -238,7 +238,17 @@ def using_cgroupv2():
 
 def verify_controllers_available(expected_controllers):
     """
-    This check needed for cgroupv2 as controllers available(cgroup.subtree_control) at root after some point
+    Verifies that the expected controllers are enabled at the root cgroup.
+
+    This check is needed for cgroupv2 because the list of controllers enabled at the root cgroup
+    (as reported by cgroup.subtree_control) is not always populated immediately. After the first
+    boot, there is sometimes a delay before systemd enables the controllers at the root cgroup,
+    so tests running early in the boot process may observe missing controllers even though they
+    will eventually be enabled. To avoid false negatives from that race, we verify here that the
+    expected controllers are actually available before proceeding.
+
+    Note: on cgroupv1 controllers are mounted at separate hierarchies and are always available,
+    so this check is a no-op and returns True.
     """
     cgroups_api = create_cgroup_api()
     if isinstance(cgroups_api, SystemdCgroupApiv1):

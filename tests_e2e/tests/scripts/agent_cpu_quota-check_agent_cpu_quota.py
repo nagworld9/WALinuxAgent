@@ -33,13 +33,13 @@ from tests_e2e.tests.lib.cgroup_helpers import check_agent_quota_disabled, \
 from tests_e2e.tests.lib.logging import log
 from tests_e2e.tests.lib.remote_test import run_remote_test
 from tests_e2e.tests.lib.retry import retry_if_false
-from tests_e2e.tests.lib.test_result import TestSkipped
 
 
 def skip_if_cpu_controller_is_not_enabled():
     found: bool = retry_if_false(lambda: verify_controllers_available(["cpu"]), delay=120)
     if not found:
-        raise TestSkipped("The distro does not have CPU controller enabled. Skipping the test.")
+        # Failing the test to track it in daily runs for now
+        raise Exception("The distro does not have CPU controller enabled. Skipping the test.")
 
     log.info("Verified cpu controller mounted on the system")
 

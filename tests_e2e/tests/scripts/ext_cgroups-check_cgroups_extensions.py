@@ -19,7 +19,6 @@
 
 import os
 import re
-import sys
 
 from assertpy import fail
 
@@ -31,7 +30,6 @@ from tests_e2e.tests.lib.cgroup_helpers import verify_if_distro_supports_cgroup,
     print_cgroups, get_mounted_controller_list, using_cgroupv2, verify_controllers_available
 from tests_e2e.tests.lib.logging import log
 from tests_e2e.tests.lib.retry import retry_if_false
-from tests_e2e.tests.lib.test_result import TestSkipped, RemoteTestExitCode
 
 CUSTOM_SCRIPT_EXTENSION_PATH = \
     "/azure.slice/azure-vmextensions.slice/azure-vmextensions-Microsoft.Azure.Extensions.CustomScript"
@@ -44,12 +42,11 @@ def skip_if_controllers_not_mounted():
     This method checks if the controllers are mounted on the system. If not, it skips the test.
     """
     log.info("===== Verifying if cgroup controllers are mounted on the system")
-    cpu_enabled: bool = retry_if_false(lambda: verify_controllers_available(["cpu"]), delay=60)
-    memory_enabled: bool = retry_if_false(lambda: verify_controllers_available(["memory"]), delay=60)
-    if not cpu_enabled and not memory_enabled:
-        raise TestSkipped("The distro does not have CPU or Memory controller enabled. Skipping the test.")
+    controllers_enabled: bool = retry_if_false(lambda: verify_controllers_available(["cpu", "memory"]), delay=120)
+    if not controllers_enabled:
+        raise Exception("The distro does not have CPU and Memory controllers enabled. Skipping the test.")
 
-    log.info("Verified controller availability (cpu=%s, memory=%s)", cpu_enabled, memory_enabled)
+    log.info("Verified cpu and memory controllers are available")
 
 
 def verify_custom_script_cgroup_assigned_correctly():
@@ -182,6 +179,9 @@ def verify_extension_service_cgroup_created(service_name, cgroup_mount_path):
     verified_cgroups_path = []
 
     for controller in get_mounted_controller_list():
+        # cgroup_mount_path is similar to /azure.slice/walinuxagent.service
+        # cgroup_mount_path[1:] = azure.slice/walinuxagent.service
+        # expected extension_service_controller_path similar to /sys/fs/cgroup/cpu/azure.slice/walinuxagent.service
         extension_service_controller_path = os.path.join(BASE_CGROUP, controller, cgroup_mount_path[1:])
 
         if not os.path.exists(extension_service_controller_path):
@@ -259,8 +259,5 @@ except Exception as e:
     # It is possible that agent cgroup can be disabled and reset the quotas if the extension failed to start using systemd-run. In that case, we should ignore the validation
     if check_cgroup_disabled_due_to_systemd_error() and retry_if_false(check_agent_quota_disabled):
         log.info("Cgroup is disabled due to systemd error while invoking the extension, ignoring ext cgroups validations")
-    elif isinstance(e, TestSkipped):
-        log.info("Test skipped: %s", e)
-        sys.exit(RemoteTestExitCode.SKIP)
     else:
         raise

@@ -41,6 +41,12 @@ def verify_agent_cgroups_not_enabled():
 
     dummy_pid = None
     try:
+        # The dummy PID is the PID of the long-running `sleep` process spawned by the CustomScript
+        # extension in the previous test step (see agent_cgroups_process_check._install_cse_with_dummy_process).
+        # CSE's commandToExecute launches a detached shell that execs `sleep 100000` (so the shell's
+        # PID becomes the sleep PID) and writes it to this file before CSE itself exits quickly.
+        # This leftover process lands in the agent cgroup, and we look it up here to verify that
+        # the agent detected it as an unexpected process and refused to re-enable cgroups.
         with open("/var/lib/waagent/tmp/dummy_proc.pid") as fh:
             dummy_pid = fh.read().strip()
     except Exception as e:
