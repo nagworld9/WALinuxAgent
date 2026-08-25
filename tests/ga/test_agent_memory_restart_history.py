@@ -31,7 +31,7 @@ VERSION = "2.13.1.1"
 OTHER_VERSION = "2.13.1.2"
 
 
-class RestartHistoryTestCase(AgentTestCase):
+class AgentRestartHistoryTestCase(AgentTestCase):
     """
     Unit tests for azurelinuxagent.ga.agent_memory_restart_history.AgentMemoryRestartHistory.
     """
@@ -159,8 +159,7 @@ class RestartHistoryTestCase(AgentTestCase):
         self._seed({VERSION: [(mid, 1), (old, 2), (new, 3)]})
         last = self._new().get_version_latest_restart_time(VERSION)
         self.assertIsNotNone(last)
-        # Compare at second precision to avoid microsecond flakes from round-trip.
-        self.assertEqual(new.replace(microsecond=0), last.replace(microsecond=0))
+        self.assertEqual(new, last)
 
     def test_get_version_latest_restart_time_raises_when_timestamps_unparseable(self):
         # An unparseable timestamp must propagate rather than silently return
@@ -286,6 +285,35 @@ class RestartHistoryTestCase(AgentTestCase):
         self.assertEqual([11, 22], [e["anon_bytes"] for e in reloaded.get_version_restarts("2.13.0.0")])
         self.assertEqual([33], [e["anon_bytes"] for e in reloaded.get_version_restarts("2.14.0.0")])
         self.assertEqual([44], [e["anon_bytes"] for e in reloaded.get_version_restarts("2.15.0.0")])
+
+    def test_load_accepts_unknown_schema_version_and_preserves_it(self):
+        now = datetime.now(UTC)
+        future_schema = SCHEMA_VERSION + 999
+        self._seed({VERSION: [(now - timedelta(days=1), 123)]}, schema_version=future_schema)
+
+        hist = self._new()
+        # Entries under the known 'versions' key must still be readable.
+        entries = hist.get_version_restarts(VERSION)
+        self.assertEqual(1, len(entries))
+        self.assertEqual(123, entries[0]["anon_bytes"])
+
+        # A subsequent write must preserve the unknown schema_version on disk.
+        hist.record_restart(VERSION, 456)
+        with open(self.history_path) as f:
+            data = json.load(f)
+        self.assertEqual(future_schema, data["schema_version"],
+                         "Unknown schema_version must be preserved, not silently rewritten")
+        self.assertEqual([123, 456], [e["anon_bytes"] for e in data["versions"][VERSION]])
+
+    def test_load_defaults_schema_version_when_missing(self):
+        with open(self.history_path, "w") as f:
+            json.dump({"versions": {VERSION: []}}, f)
+        hist = self._new()
+        self.assertEqual([], hist.get_version_restarts(VERSION))
+        hist.record_restart(VERSION, 1)
+        with open(self.history_path) as f:
+            data = json.load(f)
+        self.assertEqual(SCHEMA_VERSION, data["schema_version"])
 
     def test_record_restart_reraises_when_save_fails(self):
         # A save failure must propagate so callers can abort the restart; otherwise

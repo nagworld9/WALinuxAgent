@@ -40,6 +40,7 @@ Approach
 import datetime
 import json
 import os
+import re
 import sys
 
 from assertpy import fail
@@ -49,7 +50,9 @@ from azurelinuxagent.common.utils import shellutil
 from azurelinuxagent.ga import state_dir
 from azurelinuxagent.ga.agent_memory_restart_history import HISTORY_FILE_NAME
 from azurelinuxagent.ga.update import CHILD_LAUNCH_INTERVAL
+from azurelinuxagent.common.version import CURRENT_VERSION
 
+from tests_e2e.tests.lib.agent_log import AgentLog
 from tests_e2e.tests.lib.cgroup_helpers import check_log_message, using_cgroupv2
 from tests_e2e.tests.lib.logging import log
 from tests_e2e.tests.lib.remote_test import run_remote_test
@@ -60,7 +63,6 @@ from tests_e2e.tests.lib.retry import retry_if_false
 # Config knobs used to force a deterministic breach in a short window.
 # -----------------------------------------------------------------------------
 _TEST_CONF = [
-    "Debug.EnableAgentMemoryUsageCheck=y",
     "Debug.AgentAnonMemoryQuota=1",
     "Debug.AgentMemoryConsecutiveBreachCount=2",
     "Debug.AgentMemoryMaxRestartsPerVersion=1",
@@ -69,13 +71,13 @@ _TEST_CONF = [
     "Debug.CgroupLogMetrics=y",
 ]
 
-_DEFAULT_CONF = [
-    "Debug.EnableAgentMemoryUsageCheck=n",
-    "Debug.AgentAnonMemoryQuota={0}".format(300 * 1024 ** 2),
-    "Debug.AgentMemoryConsecutiveBreachCount=3",
+_REMOVE_CONF = [
+    "Debug.AgentAnonMemoryQuota",
+    "Debug.AgentMemoryConsecutiveBreachCount",
     "Debug.AgentMemoryMaxRestartsPerVersion=5",
-    "Debug.AgentMemoryMinRestartIntervalSeconds={0}".format(3 * 24 * 60 * 60),
-    "Debug.CgroupCheckPeriod=300",
+    "Debug.AgentMemoryMinRestartIntervalSeconds",
+    "Debug.CgroupCheckPeriod",
+    "Debug.CgroupLogMetrics"
 ]
 
 
@@ -85,9 +87,12 @@ def _skip_if_unsupported():
         sys.exit(0)
 
 
-def _apply_conf(kv_pairs):
+def _apply_conf(kv_pairs, remove=False):
     log.info("Applying waagent.conf overrides: %s", kv_pairs)
-    shellutil.run_command(["update-waagent-conf"] + kv_pairs)
+    if remove:
+        shellutil.run_command(["remove-waagent-conf"] + kv_pairs)
+    else:
+        shellutil.run_command(["update-waagent-conf"] + kv_pairs)
 
 
 def _restart_agent():
@@ -115,13 +120,53 @@ def verify_consecutive_breach_events(after):
     log.info("Successfully observed 2 consecutive breach log lines")
 
 
-def verify_agent_exited_due_to_breach(after):
+def _get_ext_handler_pid():
+    """
+    Returns the PID of the running ext-handler process, or None if not found.
+    The ext-handler is the child that the daemon launches with '-run-exthandlers'.
+    """
+    try:
+        # -o = oldest match (avoid transient forks); -f matches the full cmdline.
+        out = shellutil.run_command(["pgrep", "-o", "-f", "-run-exthandlers"]).strip()
+        return int(out) if out else None
+    except Exception:
+        return None
+
+
+def _wait_for_ext_handler_pid(exclude_pid=None):
+    """
+    Wait until an ext-handler process exists whose PID != exclude_pid.
+    Returns the new PID, or None if we time out.
+    """
+    def _new_pid_up():
+        pid = _get_ext_handler_pid()
+        return pid is not None and pid != exclude_pid
+
+    if not retry_if_false(_new_pid_up, attempts=5, delay=10):
+        return None
+    return _get_ext_handler_pid()
+
+
+def verify_agent_exited_due_to_breach(after, previous_pid):
     log.info("** Verifying that the agent exited due to sustained anon memory breach")
     if not retry_if_false(
             lambda: check_log_message(r"sustained anon memory breach", after_timestamp=after),
             delay=15):
         fail("The agent did not log the 'sustained anon memory breach' exit reason")
     log.info("Successfully observed the ExitException reason in the agent log")
+
+    # Log line alone is not enough -- confirm the process actually exited and
+    # the daemon relaunched a fresh ext-handler with a different PID.
+    log.info("** Verifying that the ext-handler process exited and was relaunched (previous PID=%s)", previous_pid)
+    new_pid = _wait_for_ext_handler_pid(exclude_pid=previous_pid)
+    if new_pid is None:
+        fail("The ext-handler did not restart with a new PID after the sustained-breach exit "
+             "(previous PID was {0})".format(previous_pid))
+    if previous_pid is not None and new_pid == previous_pid:
+        fail("The ext-handler PID did not change after the sustained-breach exit "
+             "(still {0}); the process did not actually exit".format(previous_pid))
+    log.info("Ext-handler was relaunched: old PID=%s, new PID=%s", previous_pid, new_pid)
+    return new_pid
 
 
 def verify_restart_history_recorded():
@@ -141,16 +186,55 @@ def verify_restart_history_recorded():
     if not versions:
         fail("Restart history file has no 'versions' entries: {0}".format(data))
 
-    # Must contain exactly one entry for at least one version and it must include
-    # a timestamp and anon_bytes field.
-    total_entries = sum(len(v) for v in versions.values())
-    if total_entries < 1:
-        fail("Restart history file has zero recorded restarts: {0}".format(data))
+    # Baseline test: history was deleted in cleanup() of any prior run, and we
+    # only trigger a single self-exit here. So the file must contain exactly
+    # one version key (the currently-running agent) with exactly one recorded
+    # restart entry.
+    expected_version = str(CURRENT_VERSION)
+    if list(versions.keys()) != [expected_version]:
+        fail("Restart history must contain exactly one version entry for {0}; got keys={1}"
+             .format(expected_version, list(versions.keys())))
 
-    sample = next(iter(versions.values()))[0]
+    entries = versions[expected_version]
+    if len(entries) != 1:
+        fail("Restart history for {0} must contain exactly one recorded restart; got {1} entries: {2}"
+             .format(expected_version, len(entries), entries))
+
+    sample = entries[0]
     if "timestamp" not in sample or "anon_bytes" not in sample:
         fail("Restart history entry is missing required fields: {0}".format(sample))
     log.info("Restart history file OK: %s", data)
+
+
+def _count_log_message(pattern, after_timestamp=None):
+    """
+    Return the number of records in the full agent log whose message matches
+    `pattern` (regex). If `after_timestamp` is given, only records with a
+    strictly newer timestamp are counted.
+    """
+    count = 0
+    for record in AgentLog().read():
+        if after_timestamp is not None and record.timestamp <= after_timestamp:
+            continue
+        if re.search(pattern, record.message, flags=re.DOTALL) is not None:
+            count += 1
+    return count
+
+
+def verify_exit_message_logged_exactly_once(after):
+    """
+    The 'sustained anon memory breach ... exiting' log line must appear
+    exactly once for this test run. More than one means either the guardrail
+    failed to block the second cycle, or the exit path is being taken from
+    multiple sites.
+    """
+    log.info("** Verifying the sustained-breach exit message appears exactly once")
+    count = _count_log_message(r"sustained anon memory breach", after_timestamp=after)
+    if count != 1:
+        fail("Expected exactly one 'sustained anon memory breach' log line, found {0}. "
+             "The guardrail must prevent additional self-restart exits within the same run."
+             .format(count))
+    log.info("Sustained-breach exit message occurred exactly once, as expected")
 
 
 def verify_guardrail_blocks_second_restart(after):
@@ -176,8 +260,9 @@ def cleanup():
             os.remove(history_path)
     except Exception as e:
         log.warning("Failed to remove %s: %s", history_path, e)
-    _apply_conf(_DEFAULT_CONF)
+    _apply_conf(_REMOVE_CONF, remove=True)
     _restart_agent()
+
     _wait_for_agent_startup(datetime.datetime.now(UTC))
 
 
@@ -193,14 +278,35 @@ def main():
         _restart_agent()
         _wait_for_agent_startup(start)
 
+        # Capture the ext-handler PID before we trigger the breach so we can
+        # confirm the process actually exited (not just that it logged the
+        # exit reason).
+        pre_breach_pid = _wait_for_ext_handler_pid()
+        if pre_breach_pid is None:
+            fail("Could not find the ext-handler PID after agent restart")
+        log.info("Ext-handler PID before breach: %s", pre_breach_pid)
+
         verify_consecutive_breach_events(start)
-        verify_agent_exited_due_to_breach(start)
+        new_pid = verify_agent_exited_due_to_breach(start, pre_breach_pid)
         verify_restart_history_recorded()
 
         # From here on, the daemon has relaunched the ext-handler. The new
         # process must observe the guardrail block on its next breach cycle.
         after_first_exit = datetime.datetime.now(UTC)
         verify_guardrail_blocks_second_restart(after_first_exit)
+
+        # After the guardrail has blocked the second cycle, the exit-reason line
+        # must still have appeared exactly once across the full run. Anything
+        # higher would mean the guardrail failed to short-circuit the exit.
+        verify_exit_message_logged_exactly_once(start)
+
+        # Sanity: guardrail path must NOT exit the process, so the PID from
+        # after the first exit must still be running.
+        current_pid = _get_ext_handler_pid()
+        if current_pid != new_pid:
+            fail("Ext-handler PID changed unexpectedly after the guardrail block "
+                 "(expected {0}, found {1}); the guardrail path should not exit the process"
+                 .format(new_pid, current_pid))
 
     finally:
         cleanup()

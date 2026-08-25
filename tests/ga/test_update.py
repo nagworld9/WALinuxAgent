@@ -2719,6 +2719,15 @@ class AgentMemoryCheckTestCase(AgentTestCase):
             with patch("azurelinuxagent.ga.cgroupconfigurator.CGroupConfigurator._Impl.using_cgroup_v2", return_value=True):
                 yield
 
+    def test_check_skipped_when_cgroup_v1_in_use(self):
+        with patch('azurelinuxagent.common.conf.get_enable_agent_memory_usage_check', return_value=True):
+            with patch("azurelinuxagent.ga.cgroupconfigurator.CGroupConfigurator._Impl.using_cgroup_v2", return_value=False):
+                with patch("azurelinuxagent.ga.cgroupconfigurator.CGroupConfigurator._Impl.check_agent_memory_usage") as mock_check:
+                    update_handler = self._mock_update_handler()
+                    update_handler._check_agent_memory_usage()
+                    self.assertEqual(0, mock_check.call_count,
+                                     "check_agent_memory_usage must not be invoked on cgroup v1 hosts")
+
     def test_check_skipped_when_feature_disabled(self):
         with patch('azurelinuxagent.common.conf.get_enable_agent_memory_usage_check', return_value=False):
             with patch("azurelinuxagent.ga.cgroupconfigurator.CGroupConfigurator._Impl.using_cgroup_v2", return_value=True):
@@ -2864,6 +2873,175 @@ class AgentMemoryCheckTestCase(AgentTestCase):
                                        and "within min interval" in kw.get("message", "")]
                         self.assertEqual(1, len(skip_events),
                                          "The min-interval guardrail reason must be surfaced in telemetry")
+
+    def test_unexpected_exception_resets_consecutive_breach_counter(self):
+        with self._mock_enabled():
+            update_handler = self._mock_update_handler()
+
+            # First, accumulate two confirmed breaches so the counter is non-zero.
+            with patch("azurelinuxagent.ga.cgroupconfigurator.CGroupConfigurator._Impl.check_agent_memory_usage",
+                       side_effect=self._breach_exception()):
+                update_handler._check_agent_memory_usage()
+                update_handler._last_check_memory_usage_time = 0
+                update_handler._check_agent_memory_usage()
+            self.assertEqual(2, update_handler._agent_memory_consecutive_breaches,
+                             "Test setup: two confirmed breaches must be counted")
+
+            # Now the check raises an *unexpected* error (e.g. cgroup read failed).
+            # The counter must reset so we do not exit on the next confirmed breach alone.
+            with patch("azurelinuxagent.ga.cgroupconfigurator.CGroupConfigurator._Impl.check_agent_memory_usage",
+                       side_effect=Exception("unexpected cgroup read failure")):
+                update_handler._last_check_memory_usage_time = 0
+                # Must not propagate; the check swallows unexpected errors.
+                update_handler._check_agent_memory_usage()
+
+            self.assertEqual(0, update_handler._agent_memory_consecutive_breaches,
+                             "An unexpected exception from check_agent_memory_usage must reset "
+                             "the consecutive-breach counter (we cannot confirm a breach occurred)")
+
+
+class AgentMemoryReportThrottleTestCase(AgentTestCase):
+    """
+    Tests for UpdateHandler._report_agent_memory_event() throttling.
+
+    Contract being locked in:
+      * At most AGENT_MEMORY_REPORT_MAX_EVENTS emissions per category, per rolling
+        AGENT_MEMORY_REPORT_PERIOD window.
+      * Categories have independent quotas (a full BREACH quota must not
+        block a RESET/SKIP/EXCEPTION message).
+      * Timestamps older than the rolling window are pruned so quota
+        recovers over time.
+      * success=False routes to logger.warn and emits is_success=False telemetry.
+    """
+
+    def _new_handler(self):
+        handler = get_update_handler()
+        # The dict is created lazily in __init__ in production; make sure the
+        # test starts from a clean, empty state regardless.
+        handler._agent_memory_last_report_time = {}
+        return handler
+
+    def test_emits_up_to_max_events_then_throttles(self):
+        from azurelinuxagent.ga.update import AGENT_MEMORY_REPORT_MAX_EVENTS
+        from azurelinuxagent.ga.update import AgentMemoryEventCategory
+
+        handler = self._new_handler()
+        with patch("azurelinuxagent.ga.update.add_event") as patch_add_event:
+            with patch("azurelinuxagent.ga.update.logger.info"):
+                # One over the cap: the last call must be dropped.
+                for i in range(AGENT_MEMORY_REPORT_MAX_EVENTS + 1):
+                    handler._report_agent_memory_event(
+                        AgentMemoryEventCategory.BREACH, "breach {0}".format(i))
+
+        self.assertEqual(AGENT_MEMORY_REPORT_MAX_EVENTS, patch_add_event.call_count,
+                         "Only AGENT_MEMORY_REPORT_MAX_EVENTS telemetry events must be emitted per window")
+
+    def test_categories_have_independent_quotas(self):
+        from azurelinuxagent.ga.update import AGENT_MEMORY_REPORT_MAX_EVENTS
+        from azurelinuxagent.ga.update import AgentMemoryEventCategory
+
+        handler = self._new_handler()
+        with patch("azurelinuxagent.ga.update.add_event") as patch_add_event:
+            with patch("azurelinuxagent.ga.update.logger.info"):
+                with patch("azurelinuxagent.ga.update.logger.warn"):
+                    # Exhaust BREACH quota entirely.
+                    for i in range(AGENT_MEMORY_REPORT_MAX_EVENTS + 3):
+                        handler._report_agent_memory_event(
+                            AgentMemoryEventCategory.BREACH, "breach {0}".format(i))
+                    # Other categories must still be able to emit.
+                    handler._report_agent_memory_event(
+                        AgentMemoryEventCategory.RESET, "reset")
+                    handler._report_agent_memory_event(
+                        AgentMemoryEventCategory.SKIP, "skip")
+                    handler._report_agent_memory_event(
+                        AgentMemoryEventCategory.EXCEPTION, "boom", success=False)
+
+        # AGENT_MEMORY_REPORT_MAX_EVENTS BREACH events + 1 RESET + 1 SKIP + 1 EXCEPTION.
+        self.assertEqual(AGENT_MEMORY_REPORT_MAX_EVENTS + 3, patch_add_event.call_count,
+                         "Each category owns an independent quota; a saturated BREACH quota must not "
+                         "block RESET/SKIP/EXCEPTION events")
+
+    def test_expired_timestamps_are_pruned_and_quota_recovers(self):
+        from azurelinuxagent.ga.update import (
+            AGENT_MEMORY_REPORT_MAX_EVENTS, AGENT_MEMORY_REPORT_PERIOD)
+        from azurelinuxagent.ga.update import AgentMemoryEventCategory
+
+        handler = self._new_handler()
+        # Pre-seed the category with MAX timestamps that all fall *outside* the
+        # rolling window (older than AGENT_MEMORY_REPORT_PERIOD). These must be
+        # pruned on the next call, so a fresh emission goes through.
+        stale = datetime.now(UTC) - (AGENT_MEMORY_REPORT_PERIOD + timedelta(seconds=1))
+        handler._agent_memory_last_report_time[AgentMemoryEventCategory.BREACH] = \
+            [stale] * AGENT_MEMORY_REPORT_MAX_EVENTS
+
+        with patch("azurelinuxagent.ga.update.add_event") as patch_add_event:
+            with patch("azurelinuxagent.ga.update.logger.info"):
+                handler._report_agent_memory_event(
+                    AgentMemoryEventCategory.BREACH, "fresh after window rolled over")
+
+        self.assertEqual(1, patch_add_event.call_count,
+                         "Stale timestamps outside the rolling window must be pruned so quota recovers")
+        remaining = handler._agent_memory_last_report_time[AgentMemoryEventCategory.BREACH]
+        self.assertEqual(1, len(remaining),
+                         "After pruning, only the newly-emitted event's timestamp must remain")
+
+    def test_partial_window_expiry_frees_only_expired_slots(self):
+        from azurelinuxagent.ga.update import (
+            AGENT_MEMORY_REPORT_MAX_EVENTS, AGENT_MEMORY_REPORT_PERIOD)
+        from azurelinuxagent.ga.update import AgentMemoryEventCategory
+
+        handler = self._new_handler()
+        now = datetime.now(UTC)
+        # Mix: one stale + (MAX - 1) fresh. Only the stale one gets pruned,
+        # so exactly one new emission is allowed before we hit the cap again.
+        stale = now - (AGENT_MEMORY_REPORT_PERIOD + timedelta(seconds=1))
+        fresh = now - timedelta(seconds=1)
+        seeded = [stale] + [fresh] * (AGENT_MEMORY_REPORT_MAX_EVENTS - 1)
+        handler._agent_memory_last_report_time[AgentMemoryEventCategory.SKIP] = list(seeded)
+
+        with patch("azurelinuxagent.ga.update.add_event") as patch_add_event:
+            with patch("azurelinuxagent.ga.update.logger.info"):
+                handler._report_agent_memory_event(AgentMemoryEventCategory.SKIP, "one slot freed")
+                handler._report_agent_memory_event(AgentMemoryEventCategory.SKIP, "should be throttled")
+
+        self.assertEqual(1, patch_add_event.call_count,
+                         "Freeing exactly one slot must allow exactly one additional emission")
+
+    def test_throttled_call_does_not_grow_history_beyond_max(self):
+        from azurelinuxagent.ga.update import AGENT_MEMORY_REPORT_MAX_EVENTS
+        from azurelinuxagent.ga.update import AgentMemoryEventCategory
+
+        handler = self._new_handler()
+        with patch("azurelinuxagent.ga.update.add_event"):
+            with patch("azurelinuxagent.ga.update.logger.info"):
+                for i in range(AGENT_MEMORY_REPORT_MAX_EVENTS * 3):
+                    handler._report_agent_memory_event(
+                        AgentMemoryEventCategory.BREACH, "breach {0}".format(i))
+
+        stored = handler._agent_memory_last_report_time[AgentMemoryEventCategory.BREACH]
+        self.assertLessEqual(len(stored), AGENT_MEMORY_REPORT_MAX_EVENTS,
+                             "The per-category timestamp list must not grow beyond the max; "
+                             "otherwise a flood of throttled calls would slowly leak memory")
+
+    def test_failure_events_route_to_warn_and_mark_is_success_false(self):
+        from azurelinuxagent.ga.update import AgentMemoryEventCategory
+
+        handler = self._new_handler()
+        with patch("azurelinuxagent.ga.update.add_event") as patch_add_event:
+            with patch("azurelinuxagent.ga.update.logger.warn") as patch_warn:
+                with patch("azurelinuxagent.ga.update.logger.info") as patch_info:
+                    handler._report_agent_memory_event(
+                        AgentMemoryEventCategory.EXCEPTION, "cgroup read failed", success=False)
+
+        self.assertEqual(1, patch_warn.call_count,
+                         "success=False must be logged via logger.warn")
+        self.assertEqual(0, patch_info.call_count,
+                         "success=False must NOT be logged via logger.info")
+        self.assertEqual(1, patch_add_event.call_count)
+        _, kwargs = patch_add_event.call_args
+        self.assertEqual(False, kwargs.get("is_success"),
+                         "Telemetry for a failure must carry is_success=False")
+        self.assertEqual(WALAEventOperation.AgentMemory, kwargs.get("op"))
 
 
 class GoalStateIntervalTestCase(AgentTestCase):

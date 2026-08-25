@@ -72,8 +72,9 @@ class AgentMemoryRestartHistory(object):
             logger.warn("Corrupt agent memory restart history at {0}: {1}. Starting fresh.", self._path, ustr(e))
             try:
                 os.rename(self._path, self._path + ".corrupt")
-            except Exception:
-                pass
+            except Exception as rename_error:
+                logger.warn("Failed to rename corrupt agent memory restart history {0} to .corrupt: {1}",
+                            self._path, ustr(rename_error))
             return default
 
     def _save(self):
@@ -156,7 +157,7 @@ class AgentMemoryRestartHistory(object):
             # Empty entry list -> min epoch, so such versions are pruned first.
             # Any parse error propagates so we don't silently keep the wrong
             # versions on a corrupt history.
-            if not entries:
+            if len(entries) == 0:
                 return datetime.min.replace(tzinfo=UTC)
             return max(
                 datetime.strptime(e.get("timestamp", ""), _TIMESTAMP_FORMAT).replace(tzinfo=UTC)

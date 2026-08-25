@@ -1198,6 +1198,34 @@ exit 0
                     configurator.check_agent_memory_usage()
 
         self.assertIn("The agent anon memory limit {0} bytes exceeded".format(conf.get_agent_anon_memory_quota()), ustr(context_manager.exception), "An incorrect exception was raised")
+        self.assertEqual(conf.get_agent_anon_memory_quota() + 1, context_manager.exception.anon_bytes,
+                         "anon_bytes on the exception must match the reported anon usage")
+        self.assertEqual(conf.get_agent_anon_memory_quota(), context_manager.exception.limit_bytes,
+                         "limit_bytes on the exception must match the configured anon quota")
+
+    def test_check_agent_anon_memory_usage_should_not_raise_when_only_total_exceeds_limit(self):
+        limit = conf.get_agent_anon_memory_quota()
+        metrics = [
+            MetricValue(MetricsCategory.MEMORY_CATEGORY, MetricsCounter.TOTAL_MEM_USAGE, AGENT_NAME_TELEMETRY, limit + 1),
+            MetricValue(MetricsCategory.MEMORY_CATEGORY, MetricsCounter.ANON_MEM_USAGE, AGENT_NAME_TELEMETRY, limit - 1),
+        ]
+
+        with self._get_cgroup_configurator_v2() as configurator:
+            with patch("azurelinuxagent.ga.memorycontroller.MemoryControllerV2.get_tracked_metrics") as tracked_metrics:
+                tracked_metrics.return_value = metrics
+                configurator.check_agent_memory_usage()
+
+    def test_check_agent_anon_memory_usage_should_not_raise_when_anon_metric_is_absent(self):
+        limit = conf.get_agent_anon_memory_quota()
+        metrics = [
+            MetricValue(MetricsCategory.MEMORY_CATEGORY, MetricsCounter.TOTAL_MEM_USAGE, AGENT_NAME_TELEMETRY, limit + 1),
+        ]
+
+        with self._get_cgroup_configurator_v2() as configurator:
+            with patch("azurelinuxagent.ga.memorycontroller.MemoryControllerV2.get_tracked_metrics") as tracked_metrics:
+                tracked_metrics.return_value = metrics
+                # Must not raise; missing anon sample is not a breach.
+                configurator.check_agent_memory_usage()
 
     def test_get_log_collector_properties_should_return_correct_props(self):
         with self._get_cgroup_configurator() as configurator:
