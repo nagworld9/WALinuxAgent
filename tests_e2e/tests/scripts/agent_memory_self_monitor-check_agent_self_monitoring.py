@@ -74,7 +74,7 @@ _TEST_CONF = [
 _REMOVE_CONF = [
     "Debug.AgentAnonMemoryQuota",
     "Debug.AgentMemoryConsecutiveBreachCount",
-    "Debug.AgentMemoryMaxRestartsPerVersion=5",
+    "Debug.AgentMemoryMaxRestartsPerVersion",
     "Debug.AgentMemoryMinRestartIntervalSeconds",
     "Debug.CgroupCheckPeriod",
     "Debug.CgroupLogMetrics"
@@ -127,7 +127,7 @@ def _get_ext_handler_pid():
     """
     try:
         # -o = oldest match (avoid transient forks); -f matches the full cmdline.
-        out = shellutil.run_command(["pgrep", "-o", "-f", "-run-exthandlers"]).strip()
+        out = shellutil.run_command(["pgrep", "-o", "-f", "run-exthandlers"]).strip()
         return int(out) if out else None
     except Exception:
         return None
