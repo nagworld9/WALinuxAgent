@@ -39,14 +39,15 @@ DUMMY_PROC_PID_FILE = "/var/lib/waagent/tmp/dummy_proc.pid"
 
 def skip_if_controllers_not_mounted():
     """
-    This method checks if the controllers are mounted on the system. If not, it skips the test.
+    This method checks if the controller is mounted on the system. If not, raise the error.
     """
     log.info("===== Verifying if cgroup controllers are mounted on the system")
-    controllers_enabled: bool = retry_if_false(lambda: verify_controllers_available(["cpu", "memory"]), delay=120)
+    # In some systems both may not be mounted or populated immediately after boot. So checking for cpu controller only as we set the cpu limit using cgroups
+    controllers_enabled: bool = retry_if_false(lambda: verify_controllers_available(["cpu"]), delay=120, attempts=7)
     if not controllers_enabled:
-        raise Exception("The distro does not have CPU and Memory controllers enabled. Skipping the test.")
+        raise Exception("The distro does not have CPU controller enabled.")
 
-    log.info("Verified cpu and memory controllers are available")
+    log.info("Verified cpu controller is available")
 
 
 def verify_custom_script_cgroup_assigned_correctly():

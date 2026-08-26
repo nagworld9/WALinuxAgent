@@ -32,6 +32,7 @@ from tests_e2e.tests.lib.cgroup_helpers import check_log_message, get_agent_memo
 from tests_e2e.tests.lib.logging import log
 from tests_e2e.tests.lib.remote_test import run_remote_test
 from tests_e2e.tests.lib.retry import retry_if_false
+from tests_e2e.tests.lib.test_result import TestSkipped
 
 
 def skip_if_distro_not_supports_memory_quota():
@@ -42,10 +43,11 @@ def skip_if_distro_not_supports_memory_quota():
 
 
 def skip_if_memory_controller_is_not_enabled():
+    # Memory controller only used for report memory metrics. If the controller is not enabled, its ok to skip the test.
     found: bool = retry_if_false(lambda: verify_controllers_available(["memory"]), delay=120)
     if not found:
         cleanup_test_setup()
-        raise Exception("The distro does not have Memory controller enabled. Skipping the test.")
+        raise TestSkipped("The distro does not have Memory controller enabled. Skipping the test.")
 
     log.info("Verified memory controller mounted on the system")
 

@@ -36,10 +36,10 @@ from tests_e2e.tests.lib.retry import retry_if_false
 
 
 def skip_if_cpu_controller_is_not_enabled():
-    found: bool = retry_if_false(lambda: verify_controllers_available(["cpu"]), delay=120)
+    found: bool = retry_if_false(lambda: verify_controllers_available(["cpu"]), delay=120, attempts=7)
     if not found:
         # Failing the test to track it in daily runs for now
-        raise Exception("The distro does not have CPU controller enabled. Skipping the test.")
+        raise Exception("The distro does not have CPU controller enabled.")
 
     log.info("Verified cpu controller mounted on the system")
 
