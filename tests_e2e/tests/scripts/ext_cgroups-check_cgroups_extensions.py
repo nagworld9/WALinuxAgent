@@ -226,7 +226,7 @@ def verify_ext_cgroups_tracked():
         fail('Expected CustomScript cgroups were not tracked, according to the agent log. '
                         'Pattern searched for: {0} and found \n{1}'.format(cgroup_tracked_pattern_re.pattern, cgroups_added_for_telemetry))
 
-    if not gatestext_service_cgroups_tracked and not distro_name == "sles_15.6":  # In sles_15.6, gattestext service failed to install
+    if not gatestext_service_cgroups_tracked and not distro_name == "sles_15.6":  # In sles_15.6, gatestext service failed to install
         fail('Expected gatestext service cgroups were not tracked, according to the agent log. '
                         'Pattern searched for: {0} and found \n{1}'.format(cgroup_tracked_pattern_re.pattern, cgroups_added_for_telemetry))
 

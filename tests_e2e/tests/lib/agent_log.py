@@ -161,7 +161,7 @@ class AgentLog(object):
             # 2025-03-07T09:14:37.792300Z INFO ExtHandler ExtHandler [CGW] cpu controller is not enabled; will not track
             {
                 'message': r"\[CGW\]\s*(cpu|memory) controller is not enabled",
-                'if': lambda r: (DISTRO_NAME == 'ubuntu' and FlexibleVersion(DISTRO_VERSION) >= FlexibleVersion('22.00')) or (DISTRO_NAME == 'azurelinux' and FlexibleVersion(DISTRO_VERSION) >= FlexibleVersion('3.0')) or (DISTRO_NAME == 'rhel' and FlexibleVersion(DISTRO_VERSION) >= FlexibleVersion('9.0')) or (DISTRO_NAME == 'oracle' and FlexibleVersion(DISTRO_VERSION) >= FlexibleVersion('9.0')) or (DISTRO_NAME == 'sles' and FlexibleVersion(DISTRO_VERSION) >= FlexibleVersion('15.0'))
+                'if': lambda r: (DISTRO_NAME == 'ubuntu' and FlexibleVersion(DISTRO_VERSION) >= FlexibleVersion('22.00')) or (DISTRO_NAME == 'azurelinux' and FlexibleVersion(DISTRO_VERSION) >= FlexibleVersion('3.0')) or (DISTRO_NAME == 'rhel' and FlexibleVersion(DISTRO_VERSION) >= FlexibleVersion('9.0')) or (DISTRO_NAME == 'oracle' and FlexibleVersion(DISTRO_VERSION) >= FlexibleVersion('9.5')) or (DISTRO_NAME == 'sles' and FlexibleVersion(DISTRO_VERSION) >= FlexibleVersion('15.6'))
             },
             #
             #
