@@ -5,7 +5,8 @@ from tests_e2e.tests.lib.logging import log
 
 class AgentMemoryQuota(AgentVmTest):
     """
-    The test verify that the agent detects when it is throttled for using too much Memory, that it detects processes that do belong to the agent's cgroup, and that resource metrics are generated.
+    The test verifies that the agent is not throttled for memory usage (since the memory quota has been removed),
+    that it detects processes that belong to the agent's cgroup, and that resource metrics are generated.
     """
     def __init__(self, context: AgentVmTestContext):
         super().__init__(context)
