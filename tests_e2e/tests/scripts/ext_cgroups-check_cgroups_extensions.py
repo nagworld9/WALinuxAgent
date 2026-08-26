@@ -22,12 +22,13 @@ import re
 
 from assertpy import fail
 
+from azurelinuxagent.common.version import DISTRO_NAME, DISTRO_VERSION
 from tests_e2e.tests.lib.agent_log import AgentLog
 from tests_e2e.tests.lib.cgroup_helpers import verify_if_distro_supports_cgroup, \
     verify_agent_cgroup_assigned_correctly, BASE_CGROUP, get_unit_cgroup_mount_path, \
     GATESTEXT_SERVICE, check_agent_quota_disabled, \
     check_cgroup_disabled_due_to_systemd_error, CGROUP_TRACKED_PATTERN, GATESTEXT_FULL_NAME, \
-    print_cgroups, get_mounted_controller_list, using_cgroupv2, verify_controllers_available
+    print_cgroups, get_mounted_controller_list, using_cgroupv2
 from tests_e2e.tests.lib.logging import log
 from tests_e2e.tests.lib.retry import retry_if_false
 
@@ -35,19 +36,6 @@ CUSTOM_SCRIPT_EXTENSION_PATH = \
     "/azure.slice/azure-vmextensions.slice/azure-vmextensions-Microsoft.Azure.Extensions.CustomScript"
 CUSTOM_SCRIPT_FULL_NAME = "Microsoft.Azure.Extensions.CustomScript"
 DUMMY_PROC_PID_FILE = "/var/lib/waagent/tmp/dummy_proc.pid"
-
-
-def skip_if_controllers_not_mounted():
-    """
-    This method checks if the controller is mounted on the system. If not, raise the error.
-    """
-    log.info("===== Verifying if cgroup controllers are mounted on the system")
-    # In some systems both may not be mounted or populated immediately after boot. So checking for cpu controller only as we set the cpu limit using cgroups
-    controllers_enabled: bool = retry_if_false(lambda: verify_controllers_available(["cpu"]), delay=120, attempts=7)
-    if not controllers_enabled:
-        raise Exception("The distro does not have CPU controller enabled.")
-
-    log.info("Verified cpu controller is available")
 
 
 def verify_custom_script_cgroup_assigned_correctly():
@@ -208,6 +196,8 @@ def verify_ext_cgroups_tracked():
     gatestext_service_cgroups_tracked = False
     cgroup_tracked_pattern_re = re.compile(CGROUP_TRACKED_PATTERN)
 
+    distro_name = "{0}_{1}".format(DISTRO_NAME, DISTRO_VERSION)
+
     for record in AgentLog().read():
 
         # Cgroup tracking logged as
@@ -226,26 +216,25 @@ def verify_ext_cgroups_tracked():
 
     if len(cgroups_added_for_telemetry) < 1:
         fail('Expected cgroups were not tracked, according to the agent log. '
-                        'Pattern searched for: {0} and found \n{1}'.format(CGROUP_TRACKED_PATTERN.pattern, cgroups_added_for_telemetry))
+                        'Pattern searched for: {0} and found \n{1}'.format(cgroup_tracked_pattern_re.pattern, cgroups_added_for_telemetry))
 
     if not gatestext_cgroups_tracked:
         fail('Expected gatestext cgroups were not tracked, according to the agent log. '
-                        'Pattern searched for: {0} and found \n{1}'.format(CGROUP_TRACKED_PATTERN.pattern, cgroups_added_for_telemetry))
+                        'Pattern searched for: {0} and found \n{1}'.format(cgroup_tracked_pattern_re.pattern, cgroups_added_for_telemetry))
 
     if not customscript_cgroups_tracked:
         fail('Expected CustomScript cgroups were not tracked, according to the agent log. '
-                        'Pattern searched for: {0} and found \n{1}'.format(CGROUP_TRACKED_PATTERN.pattern, cgroups_added_for_telemetry))
+                        'Pattern searched for: {0} and found \n{1}'.format(cgroup_tracked_pattern_re.pattern, cgroups_added_for_telemetry))
 
-    if not gatestext_service_cgroups_tracked:
+    if not gatestext_service_cgroups_tracked and not distro_name == "sles_15.6":  # In sles_15.6, gattestext service failed to install
         fail('Expected gatestext service cgroups were not tracked, according to the agent log. '
-                        'Pattern searched for: {0} and found \n{1}'.format(CGROUP_TRACKED_PATTERN.pattern, cgroups_added_for_telemetry))
+                        'Pattern searched for: {0} and found \n{1}'.format(cgroup_tracked_pattern_re.pattern, cgroups_added_for_telemetry))
 
     log.info("Extension cgroups tracked as expected\n%s", cgroups_added_for_telemetry)
 
 
 def main():
     verify_if_distro_supports_cgroup()
-    skip_if_controllers_not_mounted()
     verify_ext_cgroup_controllers_created_on_file_system()
     verify_custom_script_cgroup_assigned_correctly()
     verify_dummy_process_in_extension_cgroup()

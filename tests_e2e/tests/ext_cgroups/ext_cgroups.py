@@ -32,6 +32,9 @@ class ExtCgroups(AgentVmTest):
         self._ssh_client = self._context.create_ssh_client()
 
     def run(self):
+        log.info("=====Verifying cgroup controllers are available before installing extensions")
+        self._run_remote_test(self._ssh_client, "ext_cgroups-verify_controllers.py", use_sudo=True)
+        self._ssh_client.run_command("agent-service restart", use_sudo=True)
         log.info("=====Installing extensions to validate ext cgroups scenario")
         InstallExtensions(self._context).run()
         log.info("=====Executing remote script check_cgroups_extensions.py to validate extension cgroups")

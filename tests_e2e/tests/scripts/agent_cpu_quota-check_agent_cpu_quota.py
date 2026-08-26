@@ -35,7 +35,7 @@ from tests_e2e.tests.lib.remote_test import run_remote_test
 from tests_e2e.tests.lib.retry import retry_if_false
 
 
-def skip_if_cpu_controller_is_not_enabled():
+def verify_if_cpu_controller_is_enabled():
     found: bool = retry_if_false(lambda: verify_controllers_available(["cpu"]), delay=120, attempts=7)
     if not found:
         # Failing the test to track it in daily runs for now
@@ -192,7 +192,7 @@ def verify_throttling_time_check_on_agent_cgroups():
 
 
 def main():
-    skip_if_cpu_controller_is_not_enabled()
+    verify_if_cpu_controller_is_enabled()
     prepare_agent()
     verify_agent_reported_metrics()
     verify_throttling_time_check_on_agent_cgroups()
