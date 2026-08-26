@@ -19,6 +19,7 @@
 # This module includes facilities to execute VM extension operations (enable, remove, etc).
 #
 import json
+import time
 import uuid
 
 from assertpy import assert_that, soft_assertions
@@ -143,7 +144,9 @@ class VirtualMachineExtensionClient(AzureSdkClient):
         attempt = 1
         instance_view = self.get_instance_view()
         while instance_view.name is not None and instance_view.type_handler_version is None and instance_view.statuses is None and attempt < 3:
-            log.info("Instance view is incomplete: %s\nRetrying attempt to get instance view...", instance_view.serialize())
+            delay_seconds = 30
+            log.info("Instance view is incomplete: %s\nRetrying attempt after %s secs delay to get instance view...", instance_view.serialize(), delay_seconds)
+            time.sleep(delay_seconds)
             instance_view = self.get_instance_view()
             attempt += 1
         log.info("Instance view:\n%s", json.dumps(instance_view.serialize(), indent=4))
