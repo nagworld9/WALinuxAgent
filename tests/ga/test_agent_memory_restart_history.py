@@ -341,16 +341,17 @@ class AgentRestartHistoryTestCase(AgentTestCase):
         hist = self._new()
 
         with patch.object(hist, "_prune_versions", side_effect=ValueError("bad timestamp")):
-            with patch("azurelinuxagent.ga.agent_memory_restart_history.add_event") as patch_add_event:
+            with patch("azurelinuxagent.ga.agent_memory_restart_history.logger.warn") as patch_warn:
                 # Must NOT raise even though pruning failed.
                 hist.record_restart("2.14.0.0", 42)
 
-        # Telemetry must surface the pruning failure so we can observe growth.
-        self.assertTrue(patch_add_event.called,
-                        "A prune failure must emit an AgentMemory telemetry event")
-        _, kwargs = patch_add_event.call_args
-        self.assertEqual(False, kwargs.get("is_success"))
-        self.assertIn("prune", kwargs.get("message", "").lower())
+        # The failure must be surfaced through logger.warn so it is observable
+        # in the agent log, and the message must reference pruning.
+        self.assertTrue(patch_warn.called,
+                        "A prune failure must be logged via logger.warn")
+        warn_args = patch_warn.call_args[0]
+        self.assertTrue(any("prune" in str(a).lower() for a in warn_args),
+                        "The warn message must reference pruning; got: {0}".format(warn_args))
 
         # The new restart must have been persisted (guardrail integrity),
         # and no versions must have been dropped (best-effort pruning).
