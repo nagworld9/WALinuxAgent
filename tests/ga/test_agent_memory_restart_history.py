@@ -286,34 +286,81 @@ class AgentRestartHistoryTestCase(AgentTestCase):
         self.assertEqual([33], [e["anon_bytes"] for e in reloaded.get_version_restarts("2.14.0.0")])
         self.assertEqual([44], [e["anon_bytes"] for e in reloaded.get_version_restarts("2.15.0.0")])
 
-    def test_load_accepts_unknown_schema_version_and_preserves_it(self):
+    def test_load_treats_unknown_schema_version_as_not_our_format(self):
+        # Strict-validation policy: a file whose schema_version does not match
+        # the current SCHEMA_VERSION is not something this writer produced,
+        # so we cannot safely interpret it. The loader must discard the
+        # in-memory state (start fresh) and the next save must overwrite the
+        # file with the current schema. This is the accepted tradeoff for
+        # not silently misinterpreting fields from a different schema.
         now = datetime.now(UTC)
         future_schema = SCHEMA_VERSION + 999
         self._seed({VERSION: [(now - timedelta(days=1), 123)]}, schema_version=future_schema)
 
         hist = self._new()
-        # Entries under the known 'versions' key must still be readable.
-        entries = hist.get_version_restarts(VERSION)
-        self.assertEqual(1, len(entries))
-        self.assertEqual(123, entries[0]["anon_bytes"])
+        # Existing entries from a mismatched schema must NOT leak into memory.
+        self.assertEqual([], hist.get_version_restarts(VERSION),
+                         "A schema_version mismatch must reset in-memory state")
 
-        # A subsequent write must preserve the unknown schema_version on disk.
+        # The next save overwrites the file with the current schema.
         hist.record_restart(VERSION, 456)
         with open(self.history_path) as f:
             data = json.load(f)
-        self.assertEqual(future_schema, data["schema_version"],
-                         "Unknown schema_version must be preserved, not silently rewritten")
-        self.assertEqual([123, 456], [e["anon_bytes"] for e in data["versions"][VERSION]])
+        self.assertEqual(SCHEMA_VERSION, data["schema_version"])
+        self.assertEqual([456], [e["anon_bytes"] for e in data["versions"][VERSION]],
+                         "Only entries written under the current schema must survive")
 
-    def test_load_defaults_schema_version_when_missing(self):
+    def test_load_treats_missing_schema_version_as_not_our_format(self):
+        # A file with no schema_version tag at all is indistinguishable from
+        # a file written by a different (non-tagged) writer; strict policy
+        # discards it.
         with open(self.history_path, "w") as f:
-            json.dump({"versions": {VERSION: []}}, f)
+            json.dump({"versions": {VERSION: [{"timestamp": "x", "anon_bytes": 1}]}}, f)
         hist = self._new()
-        self.assertEqual([], hist.get_version_restarts(VERSION))
+        self.assertEqual([], hist.get_version_restarts(VERSION),
+                         "A missing schema_version must be treated as 'not our format'")
         hist.record_restart(VERSION, 1)
         with open(self.history_path) as f:
             data = json.load(f)
         self.assertEqual(SCHEMA_VERSION, data["schema_version"])
+        self.assertEqual([1], [e["anon_bytes"] for e in data["versions"][VERSION]])
+
+    def test_record_restart_swallows_prune_failure_and_still_saves(self):
+        # A corrupt historical timestamp can make _prune_versions() raise.
+        # That must NOT propagate: dropping the record_restart() call would
+        # let the agent bypass the max-restarts guardrail on the next cycle.
+        # We accept that the file may temporarily hold more than
+        # MAX_VERSIONS_RETAINED entries; a later successful prune fixes that.
+        now = datetime.now(UTC)
+        self._seed({
+            "2.10.0.0": [(now - timedelta(days=40), 1)],
+            "2.11.0.0": [(now - timedelta(days=30), 1)],
+            "2.12.0.0": [(now - timedelta(days=20), 1)],
+            "2.13.0.0": [(now - timedelta(days=10), 1)],
+        })
+        hist = self._new()
+
+        with patch.object(hist, "_prune_versions", side_effect=ValueError("bad timestamp")):
+            with patch("azurelinuxagent.ga.agent_memory_restart_history.add_event") as patch_add_event:
+                # Must NOT raise even though pruning failed.
+                hist.record_restart("2.14.0.0", 42)
+
+        # Telemetry must surface the pruning failure so we can observe growth.
+        self.assertTrue(patch_add_event.called,
+                        "A prune failure must emit an AgentMemory telemetry event")
+        _, kwargs = patch_add_event.call_args
+        self.assertEqual(False, kwargs.get("is_success"))
+        self.assertIn("prune", kwargs.get("message", "").lower())
+
+        # The new restart must have been persisted (guardrail integrity),
+        # and no versions must have been dropped (best-effort pruning).
+        reloaded = self._new()
+        self.assertEqual([42], [e["anon_bytes"] for e in reloaded.get_version_restarts("2.14.0.0")],
+                         "The freshly-recorded restart must be persisted even when pruning fails")
+        kept = set(reloaded._data["versions"].keys())
+        self.assertEqual(
+            set(["2.10.0.0", "2.11.0.0", "2.12.0.0", "2.13.0.0", "2.14.0.0"]), kept,
+            "When pruning fails, all existing versions must be retained (best-effort)")
 
     def test_record_restart_reraises_when_save_fails(self):
         # A save failure must propagate so callers can abort the restart; otherwise

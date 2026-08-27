@@ -26,6 +26,65 @@ from azurelinuxagent.common.utils import timeutil
 
 
 HISTORY_FILE_NAME = "agent_memory_restart_history.json"
+
+# ---------------------------------------------------------------------------
+# On-disk schema contract
+# ---------------------------------------------------------------------------
+#
+# SCHEMA_VERSION is stamped into every file we write and describes the shape
+# of the JSON *this writer* produces. On read, the loader validates the
+# on-disk tag against SCHEMA_VERSION strictly: any mismatch (or missing tag)
+# means the file was written by a different writer and we cannot safely
+# interpret it, so we log a warning and start with an empty in-memory state.
+# The malformed file is left in place for inspection; the next successful
+# save overwrites it with the current schema.
+#
+# Current file layout (SCHEMA_VERSION = 1)::
+#
+#     {
+#       "schema_version": 1,
+#       "versions": {
+#         "<agent version string>": [
+#           {"timestamp": "<UTC iso8601 with 'Z'>", "anon_bytes": <int>},
+#           ...
+#         ],
+#         ...
+#       }
+#     }
+#
+# Loader behavior:
+#
+#   * Missing file                        -> start with empty state.
+#   * Unreadable JSON                     -> rename to '<path>.corrupt',
+#                                            start with empty state.
+#   * Missing / non-int 'schema_version'  -> not our format; start fresh.
+#   * 'schema_version' != SCHEMA_VERSION  -> not our format; start fresh.
+#   * 'versions' not a dict               -> not our format; start fresh.
+#
+# Downgrade / upgrade implication:
+#
+#   Because the loader is strict, a downgrade that finds a file written by
+#   a newer schema will discard it and start fresh to start tracking memory monitoring. The per-version restart
+#   guardrails therefore reset on schema mismatch. This is an accepted
+#   tradeoff: preserving unknown data would let an older agent silently
+#   misinterpret fields it does not understand.
+#
+# When to bump SCHEMA_VERSION:
+#
+#   Bump it any time the file shape changes in a way an older agent would
+#   misread -- e.g. renaming a key, changing a value type, removing a
+#   field an older agent depends on, or adding a top-level field a newer
+#   agent needs.
+#
+# When NOT to bump:
+#
+#   Optional additive fields inside each restart entry (e.g. a new key
+#   alongside "timestamp" / "anon_bytes") do not require a bump; older
+#   readers ignore them and newer writers must tolerate their absence.
+#
+# Every time you bump, update the "Current file layout" example above and
+# describe what changed, so a future maintainer can see the history.
+# ---------------------------------------------------------------------------
 SCHEMA_VERSION = 1
 _TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"  # matches timeutil.create_utc_timestamp
 # Retain restart history only for the N most-recently-active agent versions;
@@ -61,11 +120,16 @@ class AgentMemoryRestartHistory(object):
         try:
             with open(self._path, "r") as f:
                 data = json.load(f)
-            if isinstance(data, dict) and isinstance(data.get("versions"), dict):
-                return {
-                    "schema_version": data.get("schema_version", SCHEMA_VERSION),
-                    "versions": data["versions"],
-                }
+            if isinstance(data, dict):
+                file_schema = data.get("schema_version")
+                if isinstance(file_schema, int) and file_schema == SCHEMA_VERSION:
+                    if isinstance(data.get("versions"), dict):
+                        versions = data["versions"]
+                        return {
+                            "schema_version": SCHEMA_VERSION,
+                            "versions": versions,
+                        }
+
             logger.warn("Agent memory restart history at {0} is not in the expected format. Starting fresh.", self._path)
             return default
         except Exception as e:
@@ -140,7 +204,18 @@ class AgentMemoryRestartHistory(object):
         # we can index directly rather than defaulting here.
         versions = self._data["versions"]
         versions.setdefault(str(version), []).append(entry)
-        self._prune_versions()
+
+        # Pruning is best-effort: if it fails (e.g. a historical entry has a
+        # corrupt timestamp we cannot parse), we still want to persist the
+        # freshly-recorded restart -- losing that would let the agent bypass
+        # the max-restarts guardrail on the next cycle. The worst case is the
+        # file temporarily holds more than MAX_VERSIONS_RETAINED entries; a
+        # subsequent successful prune will bring it back down.
+        try:
+            self._prune_versions()
+        except Exception as e:
+            msg = "Failed to prune agent memory restart history; keeping current versions dict. Error: {0}".format(ustr(e))
+            logger.warn(msg)
         self._save()
 
     def _prune_versions(self):
@@ -155,8 +230,8 @@ class AgentMemoryRestartHistory(object):
 
         def _latest_ts(entries):
             # Empty entry list -> min epoch, so such versions are pruned first.
-            # Any parse error propagates so we don't silently keep the wrong
-            # versions on a corrupt history.
+            # Any parse error propagates to record_restart, which treats
+            # pruning as best-effort and emits telemetry.
             if len(entries) == 0:
                 return datetime.min.replace(tzinfo=UTC)
             return max(
