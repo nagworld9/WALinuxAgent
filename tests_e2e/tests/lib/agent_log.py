@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, AnyStr, Dict, Iterable, List, Match
 
 from azurelinuxagent.common.future import UTC, datetime_min_utc
+from azurelinuxagent.common.utils.flexible_version import FlexibleVersion
 from azurelinuxagent.common.version import DISTRO_NAME, DISTRO_VERSION
 
 
@@ -160,7 +161,7 @@ class AgentLog(object):
             # 2025-03-07T09:14:37.792300Z INFO ExtHandler ExtHandler [CGW] cpu controller is not enabled; will not track
             {
                 'message': r"\[CGW\]\s*(cpu|memory) controller is not enabled",
-                'if': lambda r: (DISTRO_NAME == 'ubuntu' and DISTRO_VERSION >= '22.00') or (DISTRO_NAME == 'azurelinux' and DISTRO_VERSION >= '3.0') or (DISTRO_NAME == 'rhel' and DISTRO_VERSION >= '9.0')
+                'if': lambda r: (DISTRO_NAME == 'ubuntu' and FlexibleVersion(DISTRO_VERSION) >= FlexibleVersion('22.00')) or (DISTRO_NAME == 'azurelinux' and FlexibleVersion(DISTRO_VERSION) >= FlexibleVersion('3.0')) or (DISTRO_NAME == 'rhel' and FlexibleVersion(DISTRO_VERSION) >= FlexibleVersion('9.0')) or (DISTRO_NAME == 'oracle' and FlexibleVersion(DISTRO_VERSION) >= FlexibleVersion('9.5')) or (DISTRO_NAME == 'sles' and FlexibleVersion(DISTRO_VERSION) >= FlexibleVersion('15.6'))
             },
             #
             #

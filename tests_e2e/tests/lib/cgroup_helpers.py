@@ -23,6 +23,7 @@ GATESTEXT_SERVICE = "gatestext"
 AZUREMONITOREXT_FULL_NAME = "Microsoft.Azure.Monitor.AzureMonitorLinuxAgent"
 AZUREMONITORAGENT_SERVICE = "azuremonitoragent"
 
+
 def verify_if_distro_supports_cgroup():
     """
     checks if agent is running in a distro that supports cgroups
@@ -155,6 +156,7 @@ def check_agent_quota_disabled():
     # Ubuntu 16 has an issue in expressing no quota as "infinity" https://github.com/systemd/systemd/issues/5965, so we are directly checking the quota value in cpu controller
     return cpu_quota == 'infinity' or get_unit_cgroup_cpu_quota_disabled(AGENT_SERVICE_NAME)
 
+
 def check_cgroup_disabled_due_to_systemd_error():
     """
     Returns True if the cgroup is disabled due to systemd error (Connection reset by peer)
@@ -167,6 +169,7 @@ def check_cgroup_disabled_due_to_systemd_error():
     Failed to start transient scope unit: Connection reset by peer
     """
     return check_log_message("Failed to start.+using systemd-run, will try invoking the extension directly.+[SystemdRunError].+(Message recipient disconnected from message bus without replying|Connection reset by peer|Remote peer disconnected|Transport endpoint is not connected)")
+
 
 def check_log_message(message, after_timestamp=datetime_min_utc):
     """
@@ -192,6 +195,7 @@ def get_unit_cgroup_proc_path(unit_name, controller):
     else:
         return unit_cgroup.get_procs_path()
 
+
 def get_unit_cgroup_cpu_quota_disabled(unit_name):
     """
     Returns True if cpu quota not set for the given unit cgroup
@@ -214,6 +218,7 @@ def get_unit_cgroup_cpu_quota_disabled(unit_name):
             return val == "max" # max means no quota
     return False
 
+
 def get_mounted_controller_list():
     """
     Returns list of controller names which are mounted in different cgroup paths
@@ -222,9 +227,35 @@ def get_mounted_controller_list():
         return [] # empty since v2 controllers are mounted at same root
     return ['cpu', 'memory']
 
+
 def using_cgroupv2():
     """
     Returns True if systemd v2 is used
     """
     cgroups_api = create_cgroup_api()
     return isinstance(cgroups_api, SystemdCgroupApiv2)
+
+
+def verify_controllers_available(expected_controllers):
+    """
+    Verifies that the expected controllers are enabled at the root cgroup.
+
+    This check is needed for cgroupv2 because the list of controllers enabled at the root cgroup
+    (as reported by cgroup.subtree_control) is not always populated immediately. After the first
+    boot, there is sometimes a delay before systemd enables the controllers at the root cgroup,
+    so tests running early in the boot process may observe missing controllers even though they
+    will eventually be enabled. To avoid false negatives from that race, we verify here that the
+    expected controllers are actually available before proceeding.
+
+    Note: on cgroupv1 controllers are mounted at separate hierarchies and are always available,
+    so this check is a no-op and returns True.
+    """
+    cgroups_api = create_cgroup_api()
+    if isinstance(cgroups_api, SystemdCgroupApiv1):
+        return True
+    controllers_enabled_at_root = cgroups_api._get_controllers_enabled_at_root(cgroups_api._root_cgroup_path)
+    for controller in expected_controllers:
+        if controller not in controllers_enabled_at_root:
+            log.info("Controller {0} not enabled at root cgroup path".format(controller))
+            return False
+    return True
